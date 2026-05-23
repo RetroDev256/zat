@@ -285,3 +285,13 @@ test "variable cannot be both equal and unequal" {
         \\
     , false);
 }
+
+test "some more complicated cnf works as expected" {
+    try testDpll(
+        \\p cnf 5 3
+        \\-2 5 -3 0
+        \\1 4 0
+        \\-4 1 2 5 0
+        \\
+    , true);
+}
