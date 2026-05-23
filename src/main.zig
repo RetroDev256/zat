@@ -1,105 +1,18 @@
 const std = @import("std");
 const Cnf = @import("Cnf.zig");
+const Dpll = @import("Dpll.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const Solver = struct {
-    /// Original CNF
-    cnf: *Cnf,
-    /// Values: +1 / 0 / -1
-    values: std.ArrayList(i8),
-    /// Boolean assignments history
-    undo_trail: std.ArrayList(u32),
+// Things to consider - variable assignment priority
+// - variables that occur most often first?
+// - variables in smaller clauses come first?
+// - common variables in small clauses come first?
+// - variables that occur least often first?
 
-    fn init(gpa: Allocator, cnf: *Cnf) @This() {
-        const values: std.ArrayList(i8) = .empty;
-        errdefer values.deinit(gpa);
-
-        try values.ensureTotalCapacity(cnf.v_count + 1);
-        values.items.len = cnf.v_count + 1;
-        @memset(values.items, 0);
-
-        return .{
-            .cnf = cnf,
-            .values = values,
-            .undo_trail = .empty,
-        };
-    }
-
-    fn deinit(self: *@This(), gpa: Allocator) void {
-        defer self.* = undefined;
-        self.values.deinit(gpa);
-        self.undo_trail.deinit(gpa);
-    }
-
-    // TODO: this might benefit from removing short-circuiting
-    // returns true IFF each clause is assigned and not satisfiable
-    fn clauseConflict(self: *const @This(), clause: u32) bool {
-        const start = self.cnf.offsets.items[clause];
-        const end = self.cnf.offsets.items[clause + 1];
-
-        for (start..end) |lit_idx| {
-            const lit = self.cnf.literal.items[lit_idx];
-            const val = self.values.items[@abs(lit)];
-            if (val == 0) return false; // unassigned
-
-            if (lit < 0 and val == -1) return false;
-            if (lit > 0 and val == 1) return false;
-        }
-
-        return true;
-    }
-
-    // TODO: this might benefit from removing short-circuiting
-    // returns true IFF at least one clause is assigned and satisfiable
-    fn clauseSatisfied(self: *const @This(), clause: u32) bool {
-        const start = self.cnf.offsets.items[clause];
-        const end = self.cnf.offsets.items[clause + 1];
-
-        for (start..end) |lit_idx| {
-            const lit = self.cnf.literal.items[lit_idx];
-            const val = self.values.items[@abs(lit)];
-            if (val == 0) return true; // unassigned
-
-            if (lit < 0 and val == -1) return true;
-            if (lit > 0 and val == 1) return true;
-        }
-
-        return false;
-    }
-
-    /// Returns the variable index (and sign value) that would be REQUIRED to
-    /// validate the clause. If the clause is not a unit clause, 0 is returned.
-    fn unitClause(self: *const @This(), clause: u32) i32 {
-        const start = self.cnf.offsets.items[clause];
-        const end = self.cnf.offsets.items[clause + 1];
-
-        var term: i32 = 0;
-
-        for (start..end) |lit_idx| {
-            const lit = self.cnf.literal.items[lit_idx];
-            const val = self.values.items[@abs(lit)];
-
-            if (val == 0) {
-                // more than one term is unspecified
-                if (term != 0) return 0;
-                term = lit; // term equals literal
-            } else if (val == -1) {
-                // one term is already satisfied
-                if (lit < 0) return 0;
-            } else { // val == 1
-                // one term is already satisfied
-                if (lit > 0) return 0;
-            }
-        }
-
-        return term;
-    }
-};
-
-fn parseCli(args: []const [:0]const u8) []const u8 {
-    var name = "zat";
+fn parseCli(args: []const [:0]const u8) ![]const u8 {
+    var name: []const u8 = "zat";
     const usage =
         \\USAGE:
         \\{s} [--help] INPUT
@@ -111,7 +24,7 @@ fn parseCli(args: []const [:0]const u8) []const u8 {
         \\
     ;
 
-    if (args > 0) {
+    if (args.len > 0) {
         name = args[0];
 
         for (args[1..]) |arg| {
@@ -121,7 +34,7 @@ fn parseCli(args: []const [:0]const u8) []const u8 {
             }
         }
 
-        if (args == 2) {
+        if (args.len == 2) {
             return args[1];
         }
     }
@@ -143,10 +56,18 @@ pub fn main(init: std.process.Init) !void {
     var f_reader = file.reader(init.io, &buffer);
     const reader = &f_reader.interface;
 
-    const cnf: Cnf = try .parse(init.gpa, reader);
-    std.debug.print("CNF: {any}\n", .{cnf});
+    var cnf: Cnf = try .parse(init.gpa, reader);
+    defer cnf.deinit(init.gpa);
+
+    var solver: Dpll = try .init(init.gpa, &cnf);
+    defer solver.deinit(init.gpa);
+
+    const sat: bool = try solver.dpll(init.gpa);
+    std.debug.print("{s}SAT", .{if (sat) "" else "UN"});
+    std.debug.print(" - {} conflicts\n", .{solver.conflicts});
 }
 
 test {
     _ = &Cnf; // import tests from Cnf
+    _ = &Dpll; // import tests from Dpll
 }
