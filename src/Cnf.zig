@@ -39,25 +39,25 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
             while (true) switch (try reader.peekByte()) {
                 ' ', '\t', '\n', '\r' => reader.toss(1),
                 'p' => continue :top_level .header,
-                'c' => try skipComment(reader),
+                'c' => try tossComment(reader),
                 else => return error.UnexpectedByte,
             };
         },
         .header => {
             // skip the "p cnf " string
             assert(try reader.takeByte() == 'p');
-            try skipWhitespace(reader);
+            try tossWhitespace(reader);
             const cnf = try reader.take(3);
             if (cnf[0] != 'c') return error.InvalidHeader;
             if (cnf[1] != 'n') return error.InvalidHeader;
             if (cnf[2] != 'f') return error.InvalidHeader;
-            try skipWhitespace(reader);
+            try tossWhitespace(reader);
 
             // parse the "VARIABLES CLAUSES" bit
             h_variables = try takeInteger(u32, reader);
-            try skipWhitespace(reader);
+            try tossWhitespace(reader);
             h_clauses = try takeInteger(u32, reader);
-            try skipWhitespace(reader);
+            try tossWhitespace(reader);
 
             // continue on to clause parsing
             continue :top_level .clauses;
@@ -76,7 +76,7 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
                     // skip whitespace, branch on other bytes
                     while (reader.peekByte()) |byte| switch (byte) {
                         ' ', '\t', '\n', '\r' => reader.toss(1),
-                        'c' => try skipComment(reader),
+                        'c' => try tossComment(reader),
                         else => continue :mid_level .clause,
                     } else |err| switch (err) {
                         error.EndOfStream => {},
@@ -89,7 +89,7 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
                     }
 
                     while (true) {
-                        try skipWhitespace(reader);
+                        try tossWhitespace(reader);
                         const term = try takeInteger(i32, reader);
                         if (term == 0) break; // end of clause
                         if (@abs(term) > h_variables)
@@ -110,7 +110,7 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
             // skip trailing whitespace and comments
             while (reader.peekByte()) |byte| switch (byte) {
                 ' ', '\t', '\n', '\r' => reader.toss(1),
-                'c' => try skipComment(reader),
+                'c' => try tossComment(reader),
                 else => return error.UnexpectedByte,
             } else |err| switch (err) {
                 error.EndOfStream => {},
@@ -142,35 +142,31 @@ fn takeInteger(comptime T: type, reader: *Reader) !T {
     buf[0] = try reader.takeByte();
     var len: usize = 1;
 
-    while (reader.peekByte()) |byte| {
-        switch (byte) {
-            '0'...'9' => {
-                if (len >= max_len) {
-                    return error.IntegerTooLong;
-                }
+    while (true) {
+        const byte = reader.peekByte() catch |err| {
+            if (err == error.EndOfStream) break;
+            return err;
+        };
 
-                buf[len] = byte;
-                reader.toss(1);
-                len += 1;
-            },
-            else => break,
-        }
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        else => return err,
+        if (byte < '0' or byte > '9') break;
+        if (len >= max_len) return error.IntegerTooLong;
+
+        buf[len] = byte;
+        reader.toss(1);
+        len += 1;
     }
 
     return try std.fmt.parseInt(T, buf[0..len], 10);
 }
 
-fn skipComment(reader: *Reader) !void {
+fn tossComment(reader: *Reader) !void {
     // all comments terminate with a newline
     if (std.debug.runtime_safety)
         assert(try reader.takeByte() == 'c');
     _ = try reader.discardDelimiterInclusive('\n');
 }
 
-fn skipWhitespace(reader: *Reader) !void {
+fn tossWhitespace(reader: *Reader) !void {
     while (reader.peekByte()) |byte| switch (byte) {
         ' ', '\t', '\n', '\r' => reader.toss(1),
         else => break,
@@ -203,7 +199,7 @@ test "takeInteger takes one and only one integer" {
     inline for (&.{ -123, 4, -5, -5, 5, 0, -7 }) |expected| {
         const actual = try takeInteger(i32, &reader);
         try std.testing.expectEqual(expected, actual);
-        try skipWhitespace(&reader);
+        try tossWhitespace(&reader);
     }
 }
 
@@ -261,6 +257,7 @@ test "cnf can parse complicated clause" {
         \\p cnf 5 3
         \\-2 5 -3 0
         \\1 4 0
+        \\c how complex!
         \\-4 1 2 5 0
         \\
     ;
