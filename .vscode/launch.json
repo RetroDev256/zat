@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "name": "Launch",
+            "request": "launch",
+            "program": "${workspaceFolder}/zig-out/bin/zat",
+            "preLaunchTask": "build debug",
+            "cwd": "${workspaceFolder}",
+            "args": []
+        }
+    ]
+}

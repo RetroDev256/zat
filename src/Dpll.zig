@@ -13,7 +13,7 @@ undo_trail: std.ArrayList(u32),
 conflicts: u64,
 
 pub fn init(gpa: Allocator, cnf: *const Cnf) !@This() {
-    const values = try gpa.alloc(i8, cnf.variableCount() + 1);
+    const values = try gpa.alloc(i8, cnf.variable_count + 1);
     errdefer gpa.free(values);
     @memset(values, 0);
 
@@ -118,12 +118,12 @@ fn propagateUnits(self: *@This(), gpa: Allocator) !bool {
 // true or false, they are assigned respectively. A sound reduction.
 fn applyPureLiterals(self: *@This(), gpa: Allocator) !void {
     // for each unsatisfied clause where the variable appears: false?
-    const appears_false = try gpa.alloc(bool, self.cnf.variableCount() + 1);
+    const appears_false = try gpa.alloc(bool, self.cnf.variable_count + 1);
     defer gpa.free(appears_false);
     @memset(appears_false, false);
 
     // for each unsatisfied clause where the variable appears: true?
-    const appears_true = try gpa.alloc(bool, self.cnf.variableCount() + 1);
+    const appears_true = try gpa.alloc(bool, self.cnf.variable_count + 1);
     defer gpa.free(appears_true);
     @memset(appears_true, false);
 
@@ -138,7 +138,7 @@ fn applyPureLiterals(self: *@This(), gpa: Allocator) !void {
     }
 
     // assign the values respective of appearances
-    for (1..self.cnf.variableCount() + 1) |variable| {
+    for (1..self.cnf.variable_count + 1) |variable| {
         // we can only consider unassigned variables
         if (self.values[variable] != 0) continue;
 
@@ -192,7 +192,7 @@ pub fn dpll(self: *@This(), gpa: Allocator) !bool {
 
     // find a variable we can attempt to assign
     var unassigned_idx: usize = 0;
-    for (1..self.cnf.variableCount()) |var_idx| {
+    for (1..self.cnf.variable_count) |var_idx| {
         if (self.values[var_idx] == 0) {
             unassigned_idx = var_idx;
             break;
