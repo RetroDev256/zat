@@ -3,35 +3,15 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Cnf = @import("Cnf.zig");
 
-/// Original CNF
+/// original problem CNF
 cnf: *const Cnf,
-/// Values: +1 / 0 / -1
-values: []i8,
-/// Boolean assignments history
-undo_trail: std.ArrayList(u32),
-/// Number of conflicts during solve
+/// number of conflicts
 conflicts: u64,
 
-pub fn init(gpa: Allocator, cnf: *const Cnf) !@This() {
-    const values = try gpa.alloc(i8, cnf.variable_count + 1);
-    errdefer gpa.free(values);
-    @memset(values, 0);
-
-    return .{
-        .cnf = cnf,
-        .values = values,
-        .undo_trail = .empty,
-        .conflicts = 0,
-    };
+pub fn init(cnf: *const Cnf) @This() {
+    return .{ .cnf = cnf, .conflicts = 0 };
 }
 
-pub fn deinit(self: *@This(), gpa: Allocator) void {
-    defer self.* = undefined;
-    self.undo_trail.deinit(gpa);
-    gpa.free(self.values);
-}
-
-// TODO: this might benefit from removing short-circuiting
 // returns true IFF each clause is assigned and not satisfiable
 fn clauseConflict(self: *const @This(), clause: u32) bool {
     for (self.cnf.clauseLiterals(clause)) |literal| {
@@ -44,7 +24,6 @@ fn clauseConflict(self: *const @This(), clause: u32) bool {
     return true;
 }
 
-// TODO: this might benefit from removing short-circuiting
 // returns true IFF at least one clause is assigned and satisfiable
 fn clauseSatisfied(self: *const @This(), clause: u32) bool {
     for (self.cnf.clauseLiterals(clause)) |literal| {
@@ -164,70 +143,98 @@ fn applyPureLiterals(self: *@This(), gpa: Allocator) !void {
 
 // returns true if SATISFIABLE, false if UNSATISFIABLE
 pub fn dpll(self: *@This(), gpa: Allocator) !bool {
-    // restore point at the beginning of the function
-    const trail_a = self.undo_trail.items.len;
+    // ------------------------------------------------------------------------
+    // create the data structures we will use during the actual dpll algorithm
 
-    // attempt some basic simplification
-    try self.applyPureLiterals(gpa);
-    if (!try self.propagateUnits(gpa)) {
-        // there is a conflict with applied literals and propagated units
-        // undo changes and return false to signify a conflict occurred
-        for (self.undo_trail.items[trail_a..]) |val| self.values[val] = 0;
-        self.undo_trail.items.len = trail_a;
-        self.conflicts += 1;
-        return false;
-    }
+    // a stack: stores the *number* of assignments made during undo points
+    var undo_stack: std.ArrayList(u32) = .empty;
+    defer undo_stack.deinit(gpa);
 
-    // check if all the clauses have been satisfied
-    var satisfied: bool = true;
-    for (0..self.cnf.clauseCount()) |clause| {
-        if (!self.clauseSatisfied(@intCast(clause))) {
-            satisfied = false;
-            break;
+    // a stack: stores the last assignments made during the dpll algorithm
+    var assign_stack: std.ArrayList(u32) = .empty;
+    const variable_count: u32 = self.cnf.variable_count;
+    try assign_stack.ensureTotalCapacityPrecise(gpa, variable_count);
+    defer assign_stack.deinit(gpa);
+
+    // assignments for each variable: 1 if true, -1 if false, 0 if unassigned
+    const assignments = try gpa.alloc(i8, variable_count + 1);
+    defer gpa.free(assignments);
+    @memset(assignments, 0);
+
+    // ------------------------------------------------------------------------
+    // do pre-processing on the entire CNF input for speed and simplification
+
+    // TODO: apply ALL pure literals
+    // TODO: propagate ALL units
+
+    // ------------------------------------------------------------------------
+    // dpll algorithm - the problem is satisfiable when assign_stack is full
+
+    outer: while (assign_stack.items.len != variable_count) {
+
+        // push a restore point onto the undo stack
+        try undo_stack.append(gpa, @intCast(assign_stack.items.len));
+
+        // find a variable to assign
+        var set_variable: u32 = 1;
+        while (assignments[set_variable] != 0) {
+            set_variable += 1;
         }
-    }
 
-    // the problem is SATISFIABLE
-    if (satisfied) return true;
+        inline for (&.{ -1, 1 }) |value| {
+            // assign `value` to `set_variable`
+            assignments[set_variable] = value;
+            assign_stack.appendAssumeCapacity(set_variable);
 
-    // find a variable we can attempt to assign
-    var unassigned_idx: usize = 0;
-    for (1..self.cnf.variable_count) |var_idx| {
-        if (self.values[var_idx] == 0) {
-            unassigned_idx = var_idx;
-            break;
+            // TODO: I might not need to check for conflicts if I do these
+            // *** apply pure literals
+            // *** propagate units
+
+            const conflict: bool = blk: {
+                next_clause: for (0..self.cnf.clauseCount()) |clause| {
+                    for (self.cnf.clauseLiterals(@intCast(clause))) |literal| {
+                        const variable = @abs(literal);
+
+                        if (assignments[variable] == 0) // unassigned
+                            continue :next_clause;
+                        if (literal > 0 and assignments[variable] == 1)
+                            continue :next_clause;
+                        if (literal < 0 and assignments[variable] == -1)
+                            continue :next_clause;
+                    }
+
+                    break :blk true;
+                }
+
+                break :blk false;
+            };
+
+            if (conflict) {
+                // undo the current assignments
+                const last_undo = undo_stack.items.len - 1;
+                const start = undo_stack.items[last_undo];
+                const end = assign_stack.items.len;
+                for (assign_stack.items[start..end]) |undo| {
+                    assignments[undo] = 0;
+                }
+
+                // rewind the assignment stack
+                assign_stack.items.len = start;
+            } else {
+                continue :outer;
+            }
         }
+
+        // encountered a conflict
+        undo_stack.items.len -= 1;
+
+        // we cannot backtrack further - UNSATISFIABLE
+        if (assign_stack.items.len == 0) return false;
     }
 
-    if (unassigned_idx == 0) {
-        // there are no more unassigned variables, and some unsatisfied clauses
-        // undo changes and return false to signify that we ran into a conflict
-        for (self.undo_trail.items[trail_a..]) |val| self.values[val] = 0;
-        self.undo_trail.items.len = trail_a;
-        self.conflicts += 1;
-        return false;
-    }
-
-    // restore point at time of decision
-    const trail_b = self.undo_trail.items.len;
-
-    // try to assign this variable to true - recurse
-    try self.assignVariable(gpa, unassigned_idx, 1);
-    if (try self.dpll(gpa)) return true; // SATISFIABLE
-
-    // that change is not satisfiable - backtrack to point of assignment
-    for (self.undo_trail.items[trail_b..]) |val| self.values[val] = 0;
-    self.undo_trail.items.len = trail_b;
-
-    // try to assign this variable to false - recurse
-    try self.assignVariable(gpa, unassigned_idx, -1);
-    if (try self.dpll(gpa)) return true; // SATISFIABLE
-
-    // that change is not satisfiable - backtrack all changes, conflict
-    for (self.undo_trail.items[trail_a..]) |val| self.values[val] = 0;
-    self.undo_trail.items.len = trail_a;
-    self.conflicts += 1;
-    return false;
+    // If we have reached this point, it means that all of the variables have
+    // been assigned and there are no conflicts - in other words, satisfiable.
+    return true;
 }
 
 fn testDpll(cnf_text: []const u8, sat: bool) !void {
@@ -236,9 +243,7 @@ fn testDpll(cnf_text: []const u8, sat: bool) !void {
     var cnf = try Cnf.parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    var solver: @This() = try .init(gpa, &cnf);
-    defer solver.deinit(gpa);
-
+    var solver: @This() = .init(&cnf);
     const sat_actual = try solver.dpll(gpa);
     try std.testing.expectEqual(sat, sat_actual);
 }

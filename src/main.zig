@@ -60,9 +60,7 @@ pub fn main(init: std.process.Init) !void {
     var cnf: Cnf = try .parse(init.gpa, reader);
     defer cnf.deinit(init.gpa);
 
-    var solver: Dpll = try .init(init.gpa, &cnf);
-    defer solver.deinit(init.gpa);
-
+    var solver: Dpll = .init(&cnf);
     const sat: bool = try solver.dpll(init.gpa);
     std.debug.print("{s}SAT", .{if (sat) "" else "UN"});
     std.debug.print(" - {} conflicts\n", .{solver.conflicts});
