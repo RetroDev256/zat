@@ -27,7 +27,9 @@ variable_count: u32,
 /// - empty clauses (eg. "0") *are* allowed within the CNF
 /// - empty lines *are* tolerated within this CNF parser
 /// - carriage returns *are* tolerated within this parser
-/// - non-comment tokens after all clauses return an error
+/// - end-of-clauses can be marked with a % if desired
+/// - end-of-file can be marked with a 0 if desired
+/// - ending non-comment tokens return an error
 pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
     // header: "p cnf h_variables h_clauses"
     var h_variables: u32 = undefined;
@@ -107,6 +109,30 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
                 return error.MissingClauses;
             }
 
+            optional_percent: {
+                // end of clauses sometimes marked by %
+                try tossWhitespace(reader);
+                const percent = reader.peekByte() catch |err| {
+                    if (err == error.EndOfStream)
+                        break :optional_percent;
+                    return err; // we don't handle read failures
+                };
+
+                if (percent == '%') reader.toss(1); // skip the %
+            }
+
+            optional_zero: {
+                // end of file sometimes marked by 0
+                try tossWhitespace(reader);
+                const percent = reader.peekByte() catch |err| {
+                    if (err == error.EndOfStream)
+                        break :optional_zero;
+                    return err; // we don't handle read failures
+                };
+
+                if (percent == '0') reader.toss(1); // skip the 0
+            }
+
             // skip trailing whitespace and comments
             while (reader.peekByte()) |byte| switch (byte) {
                 ' ', '\t', '\n', '\r' => reader.toss(1),
@@ -134,7 +160,7 @@ pub fn deinit(self: *@This(), gpa: Allocator) void {
 
 fn takeInteger(comptime T: type, reader: *Reader) !T {
     const info: std.builtin.Type.Int = @typeInfo(T).int;
-    const digits = comptime std.math.log2_int_ceil(u16, info.bits);
+    const digits = comptime try std.math.divCeil(u16, info.bits, 3);
     // space for a possible negative sign and digits to hold type T
     const max_len = @intFromBool(info.signedness == .signed) + digits;
 
