@@ -343,7 +343,7 @@ test "cnf can parse all files within the test_cnf directory" {
     const io = std.testing.io;
 
     const options: std.Io.Dir.OpenOptions = .{ .iterate = true };
-    const dir = try cwd.openDir(io, "src/test_cnf", options);
+    const dir = try cwd.openDir(io, "test_cnf", options);
     defer dir.close(io);
 
     var iterator = dir.iterate();
