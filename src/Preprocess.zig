@@ -6,15 +6,29 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Cnf = @import("Cnf.zig");
 
+const Pair = struct {
+    lhs: u32,
+    rhs: u32,
+    count: u32,
+};
+
 /// Finds good pairs of variables to factor out of CNF; the pairs of variables
-/// are the most common pairs across clauses. Constructs a partial adjacency
-/// list to do so, this is a fairly expensive function.
-///
-/// NOTE: this won't work correctly if you have duplicate variables in clauses -
-/// it will double-count and not accurately pick variable pairs that occur the
-/// most within clauses. This step should come AFTER that naive simplification.
-pub const Pair = struct { lhs: u32, rhs: u32, count: u32 };
+/// are the most common pairs across clauses. This is an expensive function.
+/// Asserts that you do not have duplicate variables within your clauses.
 pub fn factorPairs(gpa: Allocator, cnf: *const Cnf) ![]const Pair {
+    // ------------------------------------------------------------------------
+    // verify that clauses do not contain duplicate variables
+
+    if (std.debug.runtime_safety) {
+        for (0..cnf.clauseCount()) |clause| {
+            for (cnf.clauseLiterals(@intCast(clause)), 0..) |lhs, lhs_idx| {
+                for (cnf.clauseLiterals(@intCast(clause))[0..lhs_idx]) |rhs| {
+                    assert(@abs(lhs) != @abs(rhs));
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------------------
     // create an adjacency list of variables in considered clauses
 
@@ -166,6 +180,81 @@ pub fn variablePopularity(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
     return lengths;
 }
 
+pub const VCMapping = struct {
+    offsets: []const u32,
+    clauses: []const u32,
+
+    pub fn deinit(self: *@This(), gpa: Allocator) void {
+        defer self.* = undefined;
+        gpa.free(self.offsets);
+        gpa.free(self.clauses);
+    }
+
+    // returns the clauses containing a literal of the variable
+    pub fn variableClauses(self: *const @This(), variable: u32) []const u32 {
+        assert(variable != 0); // index 0 is invalid, there is no 0 variable
+        const start = self.offsets[variable];
+        const end = self.offsets[variable + 1];
+        return self.clauses[start..end];
+    }
+};
+
+/// Construct an inverse mapping from variables to clauses in linear time.
+/// Asserts that you do not have duplicate variables within your clauses.
+pub fn mapVariablesToClauses(gpa: Allocator, cnf: *const Cnf) !VCMapping {
+    // ------------------------------------------------------------------------
+    // count the number of clauses each variable is in, in linear time
+
+    const histogram = try gpa.alloc(u32, cnf.variable_count + 1);
+    defer gpa.free(histogram);
+    @memset(histogram, 0);
+
+    for (0..cnf.clauseCount()) |clause| {
+        for (cnf.clauseLiterals(@intCast(clause)), 0..) |lhs, lhs_idx| {
+            histogram[@abs(lhs)] += 1;
+
+            if (std.debug.runtime_safety) {
+                // do not have duplicate variables in clauses
+                for (cnf.clauseLiterals(@intCast(clause))[0..lhs_idx]) |rhs| {
+                    assert(@abs(lhs) != @abs(rhs));
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // create a list of offsets into the clause list for each variable
+
+    const offsets = try gpa.alloc(u32, cnf.variable_count + 2);
+    errdefer gpa.free(offsets);
+    offsets[0] = undefined;
+    offsets[1] = 0;
+
+    var literal_offset: u32 = 0;
+    for (histogram[1..], 1..) |count, variable| {
+        literal_offset += count;
+        offsets[variable + 1] = literal_offset;
+    }
+
+    // ------------------------------------------------------------------------
+    // place each clause into the respective variable clause sub-list
+
+    const clauses = try gpa.alloc(u32, literal_offset);
+    errdefer gpa.free(clauses);
+
+    for (0..cnf.clauseCount()) |clause| {
+        for (cnf.clauseLiterals(@intCast(clause))) |literal| {
+            const variable: u32 = @abs(literal);
+            const upper = offsets[variable + 1];
+            const remaining = histogram[variable];
+            clauses[upper - remaining] = @intCast(clause);
+            histogram[variable] -= 1;
+        }
+    }
+
+    return .{ .offsets = offsets, .clauses = clauses };
+}
+
 // A simple sugar to cut down on text bytes in each test
 const expectEqualSlices = std.testing.expectEqualSlices;
 
@@ -254,4 +343,56 @@ test "variablePopularity with two pairs and simple CNF" {
         \\-4 1 2 5 0
         \\
     , &.{ 0, 3, 4, 2, 3, 4 });
+}
+
+fn testMapVariablesToClauses(cnf_text: []const u8, expected: VCMapping) !void {
+    const gpa = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed(cnf_text);
+    var cnf: Cnf = try .parse(gpa, &reader);
+    defer cnf.deinit(gpa);
+
+    var actual = try mapVariablesToClauses(gpa, &cnf);
+    defer actual.deinit(gpa);
+
+    // The first element of the offsets is undefined, as there is no 0 variable
+    try expectEqualSlices(u32, expected.offsets[1..], actual.offsets[1..]);
+    try expectEqualSlices(u32, expected.clauses, actual.clauses);
+}
+
+test "mapVariablesToClauses does not crash on empty CNF" {
+    try testMapVariablesToClauses(
+        \\p cnf 0 0
+        \\
+    , .{
+        .offsets = &.{ undefined, 0 },
+        .clauses = &.{},
+    });
+}
+
+test "mapVariablesToClauses works with signed variables" {
+    try testMapVariablesToClauses(
+        \\p cnf 2 5
+        \\1 2 0
+        \\1 2 0
+        \\1 -2 0
+        \\-1 2 0
+        \\-1 -2 0
+        \\
+    , .{
+        .offsets = &.{ undefined, 0, 5, 10 },
+        .clauses = &.{ 0, 1, 2, 3, 4, 0, 1, 2, 3, 4 },
+    });
+}
+
+test "mapVariablesToClauses with two pairs and simple CNF" {
+    try testMapVariablesToClauses(
+        \\p cnf 5 3
+        \\-2 5 -3 0
+        \\1 4 0
+        \\-4 1 2 5 0
+        \\
+    , .{
+        .offsets = &.{ undefined, 0, 2, 4, 5, 7, 9 },
+        .clauses = &.{ 1, 2, 0, 2, 0, 1, 2, 0, 2 },
+    });
 }

@@ -204,7 +204,6 @@ fn tossWhitespace(reader: *Reader) !void {
 
 /// returns the literals in a clause
 pub fn clauseLiterals(self: *const @This(), clause: u32) []const i32 {
-    assert(clause < self.clauseCount()); // must be a valid clause
     const start = self.offsets[clause];
     const end = self.offsets[clause + 1];
     return self.literals[start..end];
