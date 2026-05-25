@@ -3,10 +3,10 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Reader = std.Io.Reader;
 
-/// a per-clause offset into the list of concatenated literals it resides
+/// a per-clause offset into the list of concatenated literals
 /// the length of offsets is one more than the number of clauses
 offsets: []const u32,
-/// a per-clause concatenated list of literals that belong to that clause
+/// a per-clause concatenated list of literals
 /// the length of literals is equal to the last element of offsets
 literals: []const i32,
 /// the number of variables within the CNF clauses
@@ -191,6 +191,7 @@ pub fn clauseCount(self: *const @This()) u32 {
 
 // A simple sugar to cut down on text bytes in each test
 const expectEqualSlices = std.testing.expectEqualSlices;
+const expectEqual = std.testing.expectEqual;
 
 test "takeInteger takes one and only one integer" {
     const int_str = "-123 4 -5 -5 5 0 -7";
@@ -198,7 +199,7 @@ test "takeInteger takes one and only one integer" {
 
     inline for (&.{ -123, 4, -5, -5, 5, 0, -7 }) |expected| {
         const actual = try takeInteger(i32, &reader);
-        try std.testing.expectEqual(expected, actual);
+        try expectEqual(expected, actual);
         try tossWhitespace(&reader);
     }
 }
@@ -230,6 +231,7 @@ test "cnf can parse dimacs cnf file with comments" {
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
+    try expectEqual(0, cnf.clauseCount());
     try expectEqualSlices(u32, &.{0}, cnf.offsets);
     try expectEqualSlices(i32, &.{}, cnf.literals);
 }
@@ -246,6 +248,7 @@ test "cnf can parse one valid clause" {
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
+    try expectEqual(1, cnf.clauseCount());
     try expectEqualSlices(u32, &.{ 0, 1 }, cnf.offsets);
     try expectEqualSlices(i32, &.{1}, cnf.literals);
 }
@@ -267,6 +270,7 @@ test "cnf can parse complicated clause" {
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
+    try expectEqual(3, cnf.clauseCount());
     try expectEqualSlices(u32, &.{ 0, 3, 5, 9 }, cnf.offsets);
     try expectEqualSlices(i32, &.{ -2, 5, -3, 1, 4, -4, 1, 2, 5 }, cnf.literals);
 }
@@ -287,6 +291,7 @@ test "clauseLiterals works as expected" {
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
+    try expectEqual(3, cnf.clauseCount());
     try expectEqualSlices(i32, &.{ -2, 5, -3 }, cnf.clauseLiterals(0));
     try expectEqualSlices(i32, &.{ 1, 4 }, cnf.clauseLiterals(1));
     try expectEqualSlices(i32, &.{ -4, 1, 2, 5 }, cnf.clauseLiterals(2));

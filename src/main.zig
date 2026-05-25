@@ -1,6 +1,7 @@
 const std = @import("std");
 const Cnf = @import("Cnf.zig");
 const Dpll = @import("Dpll.zig");
+const Preprocess = @import("Preprocess.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -70,4 +71,5 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = &Cnf; // import tests from Cnf
     _ = &Dpll; // import tests from Dpll
+    _ = &Preprocess; // import tests from Preprocess
 }
