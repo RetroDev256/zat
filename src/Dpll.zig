@@ -3,6 +3,10 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Cnf = @import("Cnf.zig");
 
+const Preprocess = @import("Preprocess.zig");
+const VCMapping = Preprocess.VCMapping;
+const Value = enum { positive, negative, unassigned };
+
 /// original problem CNF
 cnf: *const Cnf,
 /// number of conflicts
@@ -12,230 +16,235 @@ pub fn init(cnf: *const Cnf) @This() {
     return .{ .cnf = cnf, .conflicts = 0 };
 }
 
-// returns true IFF each clause is assigned and not satisfiable
-fn clauseConflict(self: *const @This(), clause: u32) bool {
-    for (self.cnf.clauseLiterals(clause)) |literal| {
-        const value = self.values[@abs(literal)];
-        if (value == 0) return false; // unassigned
-        if (literal < 0 and value == -1) return false;
-        if (literal > 0 and value == 1) return false;
-    }
-
-    return true;
-}
-
-// returns true IFF at least one clause is assigned and satisfiable
-fn clauseSatisfied(self: *const @This(), clause: u32) bool {
-    for (self.cnf.clauseLiterals(clause)) |literal| {
-        const value = self.values[@abs(literal)];
-        if (literal < 0 and value == -1) return true;
-        if (literal > 0 and value == 1) return true;
-    }
-
-    return false;
-}
-
-/// Returns the variable index (and sign value) that would be REQUIRED to
-/// validate the clause. If the clause is not a unit clause, 0 is returned.
-fn findUnit(self: *const @This(), clause: u32) i32 {
-    var term: i32 = 0;
-
-    for (self.cnf.clauseLiterals(clause)) |literal| {
-        const value = self.values[@abs(literal)];
-
-        if (value == 0) {
-            // more than one term is unspecified
-            if (term != 0) return 0;
-            term = literal; // term equals literal
-        } else if (value == -1) {
-            // one term is already satisfied
-            if (literal < 0) return 0;
-        } else { // value == 1
-            // one term is already satisfied
-            if (literal > 0) return 0;
-        }
-    }
-
-    return term;
-}
-
-// Assign a value to a variable - asserts that the variable is not yet
-// assigned, asserts that the value is either false (-1) or true (1).
-fn assignVariable(
-    self: *@This(),
-    gpa: Allocator,
-    variable: usize,
-    value: i8,
-) !void {
-    assert(self.values[variable] == 0);
-    assert(value == -1 or value == 1);
-    try self.undo_trail.append(gpa, @intCast(variable));
-    self.values[variable] = value;
-}
-
-// Finds unit clauses and propagates their values across clauses.
-// Returns false if there is a conflict, true if there is not.
-fn propagateUnits(self: *@This(), gpa: Allocator) !bool {
-    while (true) {
-        var changed: bool = false;
-        for (0..self.cnf.clauseCount()) |clause| {
-            if (self.clauseConflict(@intCast(clause))) return false;
-            if (!self.clauseSatisfied(@intCast(clause))) {
-                const unit = self.findUnit(@intCast(clause));
-                if (unit != 0) {
-                    const sign: i8 = if (unit > 0) 1 else -1;
-                    try self.assignVariable(gpa, @abs(unit), sign);
-                    changed = true;
-                }
-            }
-        }
-        if (!changed) return true;
-    }
-}
-
-// Finds literals in unsatisfied clauses. If the literals only appear as
-// true or false, they are assigned respectively. A sound reduction.
-fn applyPureLiterals(self: *@This(), gpa: Allocator) !void {
-    // for each unsatisfied clause where the variable appears: false?
-    const appears_false = try gpa.alloc(bool, self.cnf.variable_count + 1);
-    defer gpa.free(appears_false);
-    @memset(appears_false, false);
-
-    // for each unsatisfied clause where the variable appears: true?
-    const appears_true = try gpa.alloc(bool, self.cnf.variable_count + 1);
-    defer gpa.free(appears_true);
-    @memset(appears_true, false);
-
-    // determine the appearances of each variable
-    for (0..self.cnf.clauseCount()) |clause| {
-        if (self.clauseSatisfied(@intCast(clause))) continue;
-        for (self.cnf.clauseLiterals(@intCast(clause))) |literal| {
-            const variable: u32 = @abs(literal);
-            if (literal > 0) appears_true[variable] = true;
-            if (literal < 0) appears_false[variable] = true;
-        }
-    }
-
-    // assign the values respective of appearances
-    for (1..self.cnf.variable_count + 1) |variable| {
-        // we can only consider unassigned variables
-        if (self.values[variable] != 0) continue;
-
-        if (appears_false[variable]) {
-            if (appears_true[variable]) {
-                // appears in unsatisfied clauses as "false" AND "true"
-                // there is nothing that we can do here
-            } else {
-                // appears in unsatisfied clauses as "false" BUT NOT "true"
-                try self.assignVariable(gpa, variable, -1);
-            }
-        } else {
-            if (appears_true[variable]) {
-                // appears in unsatisfied clauses as "true" BUT NOT "false"
-                try self.assignVariable(gpa, variable, 1);
-            } else {
-                // does not appear in unsatisfied clauses - default "false"
-                try self.assignVariable(gpa, variable, -1);
-            }
-        }
-    }
-}
-
 // returns true if SATISFIABLE, false if UNSATISFIABLE
 pub fn dpll(self: *@This(), gpa: Allocator) !bool {
     // ------------------------------------------------------------------------
+    // zero clauses is trivially satisfiable, empty clauses are unsatisfiable
+
+    if (self.cnf.clauseCount() == 0) {
+        return true; // no clauses, SAT
+    }
+
+    for (0..self.cnf.clauseCount()) |clause| {
+        const literals = self.cnf.clauseLiterals(@intCast(clause));
+        if (literals.len == 0) return false; // empty clause, UNSAT
+    }
+
+    // ------------------------------------------------------------------------
     // create the data structures we will use during the actual dpll algorithm
 
-    // a stack: stores the *number* of assignments made during undo points
-    var undo_stack: std.ArrayList(u32) = .empty;
-    defer undo_stack.deinit(gpa);
+    // a stack: the current variable we are modifying
+    var current: std.ArrayList(u32) = .empty;
+    defer current.deinit(gpa);
 
-    // a stack: stores the last assignments made during the dpll algorithm
-    var assign_stack: std.ArrayList(u32) = .empty;
-    const variable_count: u32 = self.cnf.variable_count;
-    try assign_stack.ensureTotalCapacityPrecise(gpa, variable_count);
-    defer assign_stack.deinit(gpa);
+    // stack: the number of assigned variables per loop
+    var reduce_counts: std.ArrayList(u32) = .empty;
+    defer reduce_counts.deinit(gpa);
 
-    // assignments for each variable: 1 if true, -1 if false, 0 if unassigned
-    const assignments = try gpa.alloc(i8, variable_count + 1);
-    defer gpa.free(assignments);
-    @memset(assignments, 0);
+    // stack: every variable which was assigned
+    var assignments: std.ArrayList(u32) = .empty;
+    defer assignments.deinit(gpa);
+
+    // values for each variable: 1 if true, -1 if false, 0 if unassigned
+    const value_count: u32 = self.cnf.variable_count + 1;
+    const value_map = try gpa.alloc(Value, value_count);
+    defer gpa.free(value_map);
+    @memset(value_map, .unassigned);
 
     // ------------------------------------------------------------------------
     // do pre-processing on the entire CNF input for speed and simplification
 
+    // TODO: failed literal elimination (lookahead)
+    // TODO: equivalent literal substitution
+    // TODO: self-subsuming resolution
+    // TODO: duplicate literal removal
     // TODO: apply ALL pure literals
+    // TODO: resolution elimination
+    // TODO: tautology elimination
     // TODO: propagate ALL units
+    // TODO: vivification
+    // TODO: subsumption
+
+    const priority = try Preprocess.variablePriority(gpa, self.cnf);
+    defer gpa.free(priority);
+
+    var vc_map = try Preprocess.mapVariablesToClauses(gpa, self.cnf);
+    defer vc_map.deinit(gpa);
 
     // ------------------------------------------------------------------------
     // dpll algorithm - the problem is satisfiable when assign_stack is full
 
-    outer: while (assign_stack.items.len != variable_count) {
+    if (next(priority, value_map)) |next_variable| {
+        try current.append(gpa, next_variable);
+    } else return false; // SATISFIABLE
 
-        // push a restore point onto the undo stack
-        try undo_stack.append(gpa, @intCast(assign_stack.items.len));
-
-        // find a variable to assign
-        var set_variable: u32 = 1;
-        while (assignments[set_variable] != 0) {
-            set_variable += 1;
+    loop: while (current.getLast()) |variable| {
+        switch (value_map[variable]) {
+            .unassigned => {
+                // unassigned, so try negative
+                value_map[variable] = .negative;
+            },
+            .negative => {
+                // negative failed, revert and try positive
+                undo(&reduce_counts, &assignments, value_map);
+                value_map[variable] = .positive;
+            },
+            .positive => {
+                // both failed, revert and pop and backtrack
+                undo(&reduce_counts, &assignments, value_map);
+                value_map[variable] = .unassigned;
+                current.items.len -= 1;
+                continue :loop;
+            },
         }
 
-        inline for (&.{ -1, 1 }) |value| {
-            // assign `value` to `set_variable`
-            assignments[set_variable] = value;
-            assign_stack.appendAssumeCapacity(set_variable);
+        // prepare a restore point before we attempt simplification
+        const reset: u32 = @intCast(assignments.items.len);
+        try reduce_counts.append(gpa, reset);
 
-            // TODO: I might not need to check for conflicts if I do these
-            // *** apply pure literals
-            // *** propagate units
+        // unit propagation, pure literal elimination,
+        const conflict = try self.simplify(
+            gpa,
+            &assignments,
+            &vc_map,
+            value_map,
+            variable,
+        );
 
-            const conflict: bool = blk: {
-                next_clause: for (0..self.cnf.clauseCount()) |clause| {
-                    for (self.cnf.clauseLiterals(@intCast(clause))) |literal| {
-                        const variable = @abs(literal);
-
-                        if (assignments[variable] == 0) // unassigned
-                            continue :next_clause;
-                        if (literal > 0 and assignments[variable] == 1)
-                            continue :next_clause;
-                        if (literal < 0 and assignments[variable] == -1)
-                            continue :next_clause;
-                    }
-
-                    break :blk true;
-                }
-
-                break :blk false;
-            };
-
-            if (conflict) {
-                // undo the current assignments
-                const last_undo = undo_stack.items.len - 1;
-                const start = undo_stack.items[last_undo];
-                const end = assign_stack.items.len;
-                for (assign_stack.items[start..end]) |undo| {
-                    assignments[undo] = 0;
-                }
-
-                // rewind the assignment stack
-                assign_stack.items.len = start;
-            } else {
-                continue :outer;
-            }
+        if (!conflict) { // if there is no conflict, continue
+            if (next(priority, value_map)) |next_variable| {
+                try current.append(gpa, next_variable);
+            } else return true; // SATISFIABLE
+            continue :loop;
         }
 
-        // encountered a conflict
-        undo_stack.items.len -= 1;
-
-        // we cannot backtrack further - UNSATISFIABLE
-        if (assign_stack.items.len == 0) return false;
+        self.conflicts += 1;
     }
 
-    // If we have reached this point, it means that all of the variables have
-    // been assigned and there are no conflicts - in other words, satisfiable.
-    return true;
+    // no solution could be found
+    return false; // UNSATISFIABLE
 }
+
+fn simplify(
+    self: *@This(),
+    gpa: Allocator,
+    assignments: *std.ArrayList(u32),
+    vc_map: *const VCMapping,
+    value_map: []Value,
+    first_variable: u32,
+) !bool {
+    // the variables we need to consider for propagation
+    var process: std.ArrayList(u32) = .empty;
+    try process.append(gpa, first_variable);
+    defer process.deinit(gpa);
+
+    while (process.pop()) |variable| {
+        clauses: for (vc_map.variableClauses(variable)) |clause| {
+
+            // literal for unit clause
+            var target: ?i32 = null;
+            var conflict: bool = true;
+
+            for (self.cnf.clauseLiterals(clause)) |literal| {
+                switch (value_map[@abs(literal)]) {
+                    .unassigned => {
+                        conflict = false; // unassigned literal
+                        // at least two unassigned literals here
+                        if (target != null) continue :clauses;
+                        // track the single unassigned literal
+                        target = literal;
+                    },
+                    .negative => {
+                        // the clause has a satisfied literal
+                        if (literal < 0) continue :clauses;
+                    },
+                    .positive => {
+                        // the clause has a satisfied literal
+                        if (literal > 0) continue :clauses;
+                    },
+                }
+            }
+
+            // not satisfied and no unassigned
+            if (conflict) return true;
+
+            if (target) |literal| {
+                // assign the value to satisfy the clause;
+                // consider the affected clauses for units
+
+                if (literal < 0) {
+                    // the literal must be negative to satisfy
+                    value_map[@abs(literal)] = .negative;
+                } else if (literal > 0) {
+                    // the literal must be positive to satisfy
+                    value_map[@abs(literal)] = .positive;
+                } else unreachable; // literals must not be 0
+
+                const new_variable = @abs(literal);
+                try assignments.append(gpa, new_variable);
+                try process.append(gpa, new_variable);
+            }
+        }
+    }
+
+    // no conflicts found
+    return false;
+}
+
+fn next(
+    priority: []const u32,
+    value_map: []const Value,
+) ?u32 {
+    for (priority) |index|
+        if (value_map[index] == .unassigned)
+            return @intCast(index);
+
+    // there are no unassigned variables
+    return null; // SATISFIABLE
+}
+
+fn undo(
+    reduce_counts: *std.ArrayList(u32),
+    assignments: *std.ArrayList(u32),
+    value_map: []Value,
+) void {
+    const reset = reduce_counts.pop() orelse unreachable;
+    for (assignments.items[reset..]) |x| value_map[x] = .unassigned;
+    assignments.items.len = reset;
+}
+
+// fn conflict(
+//     self: *const @This(),
+//     vc_map: *const VCMapping,
+//     value_map: []const Value,
+//     variable: u32,
+// ) bool {
+//     // variable 0 can be used as an edge case - and since it
+//     // does not affect anything, we will never conflict.
+//     if (variable == 0) return false;
+
+//     outer: for (vc_map.variableClauses(variable)) |clause| {
+//         for (self.cnf.clauseLiterals(clause)) |literal| {
+//             const value = value_map[@abs(literal)];
+
+//             if (value == .unassigned)
+//                 continue :outer; // unassigned
+//             if (literal < 0 and value == .negative)
+//                 continue :outer; // satisfied
+//             if (literal > 0 and value == .positive)
+//                 continue :outer; // satisfied
+//         }
+
+//         // all of the variables within the clause were assigned - and
+//         // none of the variables within the clause were satisfied -
+//         // meaning that the clause was unsatisfied, and in conflict.
+//         return true;
+//     }
+
+//     // none of the affected clauses were in conflict - because
+//     // they had at least one clause satisfied or unassigned.
+//     return false;
+// }
 
 fn testDpll(cnf_text: []const u8, sat: bool) !void {
     const gpa = std.testing.allocator;
@@ -256,10 +265,41 @@ test "single variable must be true" {
     , true);
 }
 
+test "empty clause is unsatisfiable" {
+    try testDpll(
+        \\p cnf 0 1
+        \\0
+        \\
+    , false);
+}
+
+test "unit propagation works, unsat" {
+    try testDpll(
+        \\p cnf 2 3
+        \\-1 2 0
+        \\1 2 0
+        \\-2 0
+        \\
+    , false);
+}
+
 test "single variable must be false" {
     try testDpll(
         \\p cnf 1 1
         \\-1 0
+        \\
+    , true);
+}
+
+test "kinda complicated if-then-else sat" {
+    try testDpll(
+        \\p cnf 4 6
+        \\4 -2 0
+        \\-4 2 0
+        \\2 -3 -4 0
+        \\2 3 4 0
+        \\-2 -3 -1 0
+        \\-2 3 1 0
         \\
     , true);
 }
@@ -280,6 +320,15 @@ test "variables must be not equal" {
         \\1 2 0
         \\
     , true);
+}
+
+test "unspecified first variable, unsatisfiable" {
+    try testDpll(
+        \\p cnf 2 2
+        \\2 0
+        \\-2 0
+        \\
+    , false);
 }
 
 test "variable cannot be both equal and unequal" {

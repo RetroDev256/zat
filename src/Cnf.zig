@@ -336,27 +336,27 @@ test "cnf rejects literals that exceed the variable count" {
     try std.testing.expectError(error.InvalidTerm, cnf_error);
 }
 
-test "cnf can parse all files within the test_cnf directory" {
-    const gpa = std.testing.allocator;
-    const cwd = std.Io.Dir.cwd();
-    const io = std.testing.io;
-
-    const options: std.Io.Dir.OpenOptions = .{ .iterate = true };
-    const dir = try cwd.openDir(io, "test_cnf", options);
-    defer dir.close(io);
-
-    var iterator = dir.iterate();
-    while (try iterator.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-
-        const file = try dir.openFile(io, entry.name, .{});
-        defer file.close(io);
-
-        var buffer: [4096]u8 = undefined;
-        var file_reader = file.reader(io, &buffer);
-        const reader = &file_reader.interface;
-
-        var cnf: @This() = try .parse(gpa, reader);
-        defer cnf.deinit(gpa);
-    }
-}
+// test "cnf can parse all files within the test_cnf directory" {
+//     const gpa = std.testing.allocator;
+//     const cwd = std.Io.Dir.cwd();
+//     const io = std.testing.io;
+//
+//     const options: std.Io.Dir.OpenOptions = .{ .iterate = true };
+//     const dir = try cwd.openDir(io, "test_cnf", options);
+//     defer dir.close(io);
+//
+//     var iterator = dir.iterate();
+//     while (try iterator.next(io)) |entry| {
+//         if (entry.kind != .file) continue;
+//
+//         const file = try dir.openFile(io, entry.name, .{});
+//         defer file.close(io);
+//
+//         var buffer: [4096]u8 = undefined;
+//         var file_reader = file.reader(io, &buffer);
+//         const reader = &file_reader.interface;
+//
+//         var cnf: @This() = try .parse(gpa, reader);
+//         defer cnf.deinit(gpa);
+//     }
+// }

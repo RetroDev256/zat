@@ -180,6 +180,86 @@ pub fn variablePopularity(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
     return lengths;
 }
 
+// TODO: SIMPLIFY
+
+/// Based on variablePopularity - returns a list of variables in decreasing
+/// order of how many distinct variables are on related equations - can be
+/// used as a heuristic ordering for which variables to set next.
+pub fn variablePriority(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
+    const popularities = try variablePopularity(gpa, cnf);
+    defer gpa.free(popularities);
+
+    // ------------------------------------------------------------------------
+    // construct a map of the number of popularities per popularity
+    // count the number of distinct popularities
+
+    const pop_count = try gpa.alloc(u32, cnf.variable_count);
+    defer gpa.free(pop_count);
+
+    var bucket_count: u32 = 0;
+    @memset(pop_count, 0);
+
+    for (popularities[1..]) |pop| {
+        if (pop_count[pop] == 0) {
+            bucket_count += 1;
+        }
+        pop_count[pop] += 1;
+    }
+
+    // ------------------------------------------------------------------------
+    // construct a reverse mapping from popularities to offset bucket index
+    // construct a map of offsets into the destination list to place things
+
+    const pop_to_bucket = try gpa.alloc(u32, cnf.variable_count);
+    defer gpa.free(pop_to_bucket);
+
+    const pop_offsets = try gpa.alloc(u32, bucket_count + 1);
+    defer gpa.free(pop_offsets);
+
+    @memset(pop_to_bucket, undefined);
+    var total_offset: u32 = 0;
+    var bucket_index: u32 = 0;
+    pop_offsets[0] = 0;
+
+    for (0..cnf.variable_count) |reverse| {
+        // skip popularities which do not exist
+        const index = cnf.variable_count - reverse - 1;
+        const popularity = pop_count[index];
+        if (popularity == 0) continue;
+
+        // set the mapping for population to bucket
+        pop_to_bucket[index] = bucket_index;
+        bucket_index += 1;
+
+        // set the mapping from population to offset
+        total_offset += popularity;
+        pop_offsets[bucket_index] = total_offset;
+    }
+
+    // ------------------------------------------------------------------------
+    // copy all of the most popular variable indexes into the list
+
+    const most_popular = try gpa.alloc(u32, cnf.variable_count);
+    errdefer gpa.free(most_popular);
+
+    // skip variable
+    for (popularities[1..], 1..) |popularity, variable| {
+        const bucket = pop_to_bucket[popularity];
+        const remaining = pop_count[popularity];
+        const end = pop_offsets[bucket + 1];
+        most_popular[end - remaining] = @intCast(variable);
+        pop_count[popularity] -= 1;
+    }
+
+    if (std.debug.runtime_safety) {
+        for (pop_count) |remaining| {
+            assert(remaining == 0);
+        }
+    }
+
+    return most_popular;
+}
+
 pub const VCMapping = struct {
     offsets: []const u32,
     clauses: []const u32,
@@ -222,7 +302,7 @@ pub fn mapVariablesToClauses(gpa: Allocator, cnf: *const Cnf) !VCMapping {
         }
     }
 
-    // ------------------------------------------------------------------------
+    // -------------------------------------------------- 1, 2 ----------------------
     // create a list of offsets into the clause list for each variable
 
     const offsets = try gpa.alloc(u32, cnf.variable_count + 2);
@@ -395,4 +475,45 @@ test "mapVariablesToClauses with two pairs and simple CNF" {
         .offsets = &.{ undefined, 0, 2, 4, 5, 7, 9 },
         .clauses = &.{ 1, 2, 0, 2, 0, 1, 2, 0, 2 },
     });
+}
+
+fn testMostPopularVariables(cnf_text: []const u8, expected: []const u32) !void {
+    const gpa = std.testing.allocator;
+    var reader: std.Io.Reader = .fixed(cnf_text);
+    var cnf: Cnf = try .parse(gpa, &reader);
+    defer cnf.deinit(gpa);
+
+    const actual = try variablePriority(gpa, &cnf);
+    defer gpa.free(actual);
+
+    try expectEqualSlices(u32, expected, actual);
+}
+
+test "variablePriority does not crash on empty CNF" {
+    try testMostPopularVariables(
+        \\p cnf 0 0
+        \\
+    , &.{});
+}
+
+test "variablePriority works with signed variables" {
+    try testMostPopularVariables(
+        \\p cnf 2 5
+        \\1 2 0
+        \\1 2 0
+        \\1 -2 0
+        \\-1 2 0
+        \\-1 -2 0
+        \\
+    , &.{ 1, 2 });
+}
+
+test "variablePriority with two pairs and simple CNF" {
+    try testMostPopularVariables(
+        \\p cnf 5 3
+        \\-2 5 -3 0
+        \\1 4 0
+        \\-4 1 2 5 0
+        \\
+    , &.{ 2, 5, 1, 4, 3 });
 }

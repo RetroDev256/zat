@@ -1,7 +1,6 @@
 .{
     .name = .zat,
     .version = "0.0.1",
-    .minimum_zig_version = "0.16.0-dev.2736+3b515fbed",
     .paths = .{ "build.zig.zon", "build.zig", "src", "test_cnf" },
     .fingerprint = 0x8da9db57ebcb2841,
 }
