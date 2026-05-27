@@ -5,13 +5,14 @@ SOLVER="./zig-out/bin/zat"
 CNF_DIR="./test_cnf"
 TMPFILE=$(mktemp)
 PARALLEL=32
-TIMEOUT=1
+TIMEOUT=60
 
 # Find all CNF files
 find "$CNF_DIR" -type f \( -name "*.cnf" -o -name "*.dimacs" \) | sort > "$TMPFILE"
 
 run_one() {
     timeout "${TIMEOUT}s" "$SOLVER" "$1"
+    # "$SOLVER" "$1"
 }
 
 export -f run_one

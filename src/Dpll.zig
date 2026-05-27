@@ -54,6 +54,12 @@ pub fn dpll(self: *@This(), gpa: Allocator) !bool {
     // ------------------------------------------------------------------------
     // do pre-processing on the entire CNF input for speed and simplification
 
+    // TODO: basic clause redundancy - set the clause to be in-conflict and
+    // check if propagation causes conflict elsewhere. if it does, the clause
+    // is trivially redundant and can be removed. this doesn't mean the clause
+    // is only redundant if trying this results in a conflict though - it could
+    // be that we only prove it's redundant after evaluating more deeply.
+
     // TODO: failed literal elimination (lookahead)
     // TODO: equivalent literal substitution
     // TODO: self-subsuming resolution
@@ -154,14 +160,10 @@ fn simplify(
                         // track the single unassigned literal
                         target = literal;
                     },
-                    .negative => {
-                        // the clause has a satisfied literal
-                        if (literal < 0) continue :clauses;
-                    },
-                    .positive => {
-                        // the clause has a satisfied literal
-                        if (literal > 0) continue :clauses;
-                    },
+                    // the clause has a satisfied literal
+                    .negative => if (literal < 0) continue :clauses,
+                    // the clause has a satisfied literal
+                    .positive => if (literal > 0) continue :clauses,
                 }
             }
 

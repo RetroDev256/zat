@@ -61,9 +61,12 @@ pub fn main(init: std.process.Init) !void {
     defer cnf.deinit(init.gpa);
 
     var solver: Dpll = .init(&cnf);
-    const sat: bool = try solver.dpll(init.gpa);
-    std.debug.print("{s}SAT", .{if (sat) "" else "UN"});
-    std.debug.print(" - {} conflicts\n", .{solver.conflicts});
+    const sat = try solver.dpll(init.gpa);
+
+    std.debug.print(
+        "s {s}SATISFIABLE - {} CONFLICTS\n",
+        .{ if (sat) "" else "UN", solver.conflicts },
+    );
 }
 
 test {

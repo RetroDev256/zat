@@ -327,7 +327,8 @@ pub fn mapVariablesToClauses(gpa: Allocator, cnf: *const Cnf) !VCMapping {
             const variable: u32 = @abs(literal);
             const upper = offsets[variable + 1];
             const remaining = histogram[variable];
-            clauses[upper - remaining] = @intCast(clause);
+            const index = upper - remaining;
+            clauses[index] = @intCast(clause);
             histogram[variable] -= 1;
         }
     }
