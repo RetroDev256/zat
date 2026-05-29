@@ -1,15 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const Reader = std.Io.Reader;
+const Io = std.Io;
 
-/// a per-clause offset into the list of concatenated literals
-/// the length of offsets is one more than the number of clauses
-offsets: []const u32,
-/// a per-clause concatenated list of literals
-/// the length of literals is equal to the last element of offsets
-literals: []const i32,
-/// the number of variables within the CNF clauses
+clauses: std.ArrayList([]i32),
 variable_count: u32,
 
 /// Parser for a strict superset of DIMACS CNF:
@@ -30,7 +24,10 @@ variable_count: u32,
 /// - end-of-clauses can be marked with a % if desired
 /// - end-of-file can be marked with a 0 if desired
 /// - ending non-comment tokens return an error
-pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
+pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
+    var clauses: std.ArrayList([]i32) = .empty;
+    errdefer clauses.deinit(gpa);
+
     // header: "p cnf h_variables h_clauses"
     var h_variables: u32 = undefined;
     var h_clauses: u32 = undefined;
@@ -65,13 +62,8 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
             continue :top_level .clauses;
         },
         .clauses => {
-            const offsets = try gpa.alloc(u32, h_clauses + 1);
-            errdefer gpa.free(offsets);
             var literals: std.ArrayList(i32) = .empty;
-            errdefer literals.deinit(gpa);
-
-            var clause_count: u32 = 0;
-            offsets[0] = 0;
+            defer literals.deinit(gpa);
 
             mid_level: switch (enum { start, clause }.start) {
                 .start => {
@@ -86,7 +78,7 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
                     }
                 },
                 .clause => {
-                    if (clause_count >= h_clauses) {
+                    if (clauses.items.len >= h_clauses) {
                         break :mid_level; // no more
                     }
 
@@ -99,13 +91,14 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
                         try literals.append(gpa, term);
                     }
 
-                    clause_count += 1; // record existence of each clause
-                    offsets[clause_count] = @intCast(literals.items.len);
+                    const lit_slice = try literals.toOwnedSlice(gpa);
+                    errdefer gpa.free(lit_slice);
+                    try clauses.append(gpa, lit_slice);
                     continue :mid_level .start; // resume parsing clauses
                 },
             }
 
-            if (clause_count != h_clauses) {
+            if (clauses.items.len != h_clauses) {
                 return error.MissingClauses;
             }
 
@@ -144,21 +137,155 @@ pub fn parse(gpa: Allocator, reader: *Reader) !@This() {
             }
 
             return .{
-                .offsets = offsets,
-                .literals = try literals.toOwnedSlice(gpa),
+                .clauses = clauses,
                 .variable_count = h_variables,
             };
         },
     }
 }
 
-pub fn deinit(self: *@This(), gpa: Allocator) void {
-    defer self.* = undefined;
-    gpa.free(self.offsets);
-    gpa.free(self.literals);
+// TODO: failed literal elimination (lookahead)
+// TODO: equivalent literal substitution
+// TODO: self-subsuming resolution
+// TODO: duplicate literal removal
+// TODO: apply ALL pure literals
+// TODO: resolution elimination
+// TODO: tautology elimination
+// TODO: propagate ALL units
+// TODO: vivification
+// TODO: subsumption
+
+/// assert that clauses and literals are in ascending order
+fn assertClauseOrder(self: *const @This()) !void {
+    if (!std.debug.runtime_safety) return;
+    if (self.clauses.items.len == 0) return;
+    const clauses = self.clauses.items;
+
+    if (clauses.len > 0) for (1..clauses) |i| {
+        assert(clauses[i - 1] < clauses[i]);
+        if (clauses[i].len > 0) for (1..clauses[i].len) |x| {
+            assert(clauses[i][x - 1] < clauses[i][x + 1]);
+        };
+    };
 }
 
-fn takeInteger(comptime T: type, reader: *Reader) !T {
+/// sort clauses and literals into ascending order
+pub fn orderCnf(self: *@This()) void {
+    const clauses = self.clauses.items;
+
+    // Order the clauses from smallest to largest, subsume right
+    std.mem.sortUnstable([]i32, clauses, {}, lessThanClause);
+
+    for (clauses) |clause| {
+        // Order the terms in each clause from least to greatest
+        std.mem.sortUnstable(i32, clause, {}, std.sort.asc(i32));
+    }
+}
+
+/// comparison function for sorting clauses by arity
+fn lessThanClause(_: void, lhs: []i32, rhs: []i32) bool {
+    return lhs.len < rhs.len;
+}
+
+/// remove clauses that are deemed trivially redundant
+/// - eg. they are a subset of another clause
+pub fn subsume(self: *@This(), gpa: Allocator) !void {
+    if (self.clauses.items.len == 0) return;
+    const clauses = self.clauses.items;
+
+    // Clauses and literals must be ordered
+    try self.assertClauseOrder();
+
+    // Create a map of the redundant clauses
+    const redundant = try gpa.alloc(bool, clauses.len);
+    defer gpa.free(redundant);
+    @memset(redundant, false);
+
+    var a: usize = 0;
+    while (a < clauses.len) : (a += 1) {
+        if (redundant[a]) continue;
+
+        var b: usize = a + 1;
+        while (b < clauses.len) : (b += 1) {
+            if (redundant[b]) continue;
+
+            const c_a = clauses[a];
+            const c_b = clauses[b];
+            redundant[b] = subsetOf(c_a, c_b);
+        }
+    }
+
+    // Remove all the redundant clauses
+    var write: usize = 0;
+    for (clauses, 0..) |clause, index| {
+        if (redundant[index]) {
+            gpa.free(clause);
+        } else {
+            clauses[write] = clause;
+            write += 1;
+        }
+    }
+
+    // Update the number of clauses
+    clauses.len = write;
+}
+
+/// check if one clause is a subset of another - both clauses must be sorted in
+/// ascending order of terms - lhs must contain less or equal elements than rhs
+fn subsetOf(noalias lhs: []const i32, noalias rhs: []const i32) bool {
+    assert(lhs.len <= rhs.len);
+    if (std.debug.runtime_safety) {
+        if (lhs.len > 0) for (0..lhs.len - 1) |i|
+            assert(lhs[i] < lhs[i + 1]);
+        if (rhs.len > 0) for (0..rhs.len - 1) |i|
+            assert(rhs[i] < rhs[i + 1]);
+    }
+
+    var a: usize = 0;
+    var b: usize = 0;
+
+    while (a < lhs.len and b < rhs.len) {
+        if (lhs[a] == rhs[b]) {
+            // match found, advance pointers
+            a += 1;
+            b += 1;
+        } else if (lhs[a] > rhs[b]) {
+            // rhs is too small, advance rhs
+            b += 1;
+        } else {
+            // rhs can never contain lhs[a]
+            return false;
+        }
+    }
+
+    return a == lhs.len;
+}
+
+pub fn serialize(self: *const @This(), writer: *Io.Writer) !void {
+    try writer.print("p cnf {} {}\n", .{
+        self.variable_count,
+        self.clauses.items.len,
+    });
+
+    for (self.clauses.items) |clause| {
+        for (clause.literals) |literal| {
+            try writer.print("{} ", .{literal});
+        }
+        try writer.writeAll("0\n");
+    }
+}
+
+pub fn deinit(self: *@This(), gpa: Allocator) void {
+    defer self.* = undefined;
+
+    for (self.clauses.items) |clause| {
+        gpa.free(clause);
+    }
+
+    self.clauses.deinit(gpa);
+}
+
+fn takeInteger(comptime T: type, reader: *Io.Reader) !T {
     const info: std.builtin.Type.Int = @typeInfo(T).int;
     const digits = comptime try std.math.divCeil(u16, info.bits, 3);
     // space for a possible negative sign and digits to hold type T
@@ -185,14 +312,14 @@ fn takeInteger(comptime T: type, reader: *Reader) !T {
     return try std.fmt.parseInt(T, buf[0..len], 10);
 }
 
-fn tossComment(reader: *Reader) !void {
+fn tossComment(reader: *Io.Reader) !void {
     // all comments terminate with a newline
     if (std.debug.runtime_safety)
         assert(try reader.takeByte() == 'c');
     _ = try reader.discardDelimiterInclusive('\n');
 }
 
-fn tossWhitespace(reader: *Reader) !void {
+fn tossWhitespace(reader: *Io.Reader) !void {
     while (reader.peekByte()) |byte| switch (byte) {
         ' ', '\t', '\n', '\r' => reader.toss(1),
         else => break,
@@ -202,25 +329,38 @@ fn tossWhitespace(reader: *Reader) !void {
     }
 }
 
-/// returns the literals in a clause
-pub fn clauseLiterals(self: *const @This(), clause: u32) []const i32 {
-    const start = self.offsets[clause];
-    const end = self.offsets[clause + 1];
-    return self.literals[start..end];
-}
-
-/// number of clauses within the CNF
-pub fn clauseCount(self: *const @This()) u32 {
-    return @intCast(self.offsets.len - 1);
-}
-
 // A simple sugar to cut down on text bytes in each test
 const expectEqualSlices = std.testing.expectEqualSlices;
 const expectEqual = std.testing.expectEqual;
+const expect = std.testing.expect;
+
+test "subsetOf works with empty list" {
+    try expect(subsetOf(&.{}, &.{}));
+}
+
+test "subsetOf works with offset elements" {
+    try expect(subsetOf(&.{3}, &.{ -2, -1, 3, 4 }));
+}
+
+test "subsetOf works with two elements" {
+    try expect(subsetOf(&.{ -1, 4 }, &.{ -2, -1, 3, 4 }));
+}
+
+test "subsetOf works with equal elements" {
+    try expect(subsetOf(&.{ -2, -1, 3, 4 }, &.{ -2, -1, 3, 4 }));
+}
+
+test "subsetOf returns false for missing element" {
+    try expect(!subsetOf(&.{7}, &.{ -2, -1, 3 }));
+}
+
+test "subsetOf returns true for empty set subset" {
+    try expect(subsetOf(&.{}, &.{ -2, -1, 3 }));
+}
 
 test "takeInteger takes one and only one integer" {
     const int_str = "-123 4 -5 -5 5 0 -7";
-    var reader: Reader = .fixed(int_str);
+    var reader: Io.Reader = .fixed(int_str);
 
     inline for (&.{ -123, 4, -5, -5, 5, 0, -7 }) |expected| {
         const actual = try takeInteger(i32, &reader);
@@ -233,12 +373,12 @@ test "cnf can parse input lacking cnf clauses" {
     const cnf_text = "p cnf 0 0\n";
 
     const gpa = std.testing.allocator;
-    var reader: Reader = .fixed(cnf_text);
+    var reader: Io.Reader = .fixed(cnf_text);
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    try expectEqualSlices(u32, &.{0}, cnf.offsets);
-    try expectEqualSlices(i32, &.{}, cnf.literals);
+    try expectEqual(cnf.variable_count, 0);
+    try expectEqual(cnf.clauses.items.len, 0);
 }
 
 test "cnf can parse dimacs cnf file with comments" {
@@ -252,13 +392,12 @@ test "cnf can parse dimacs cnf file with comments" {
     ;
 
     const gpa = std.testing.allocator;
-    var reader: Reader = .fixed(cnf_text);
+    var reader: Io.Reader = .fixed(cnf_text);
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    try expectEqual(0, cnf.clauseCount());
-    try expectEqualSlices(u32, &.{0}, cnf.offsets);
-    try expectEqualSlices(i32, &.{}, cnf.literals);
+    try expectEqual(cnf.variable_count, 0);
+    try expectEqual(cnf.clauses.items.len, 0);
 }
 
 test "cnf can parse one valid clause" {
@@ -269,13 +408,13 @@ test "cnf can parse one valid clause" {
     ;
 
     const gpa = std.testing.allocator;
-    var reader: Reader = .fixed(cnf_text);
+    var reader: Io.Reader = .fixed(cnf_text);
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    try expectEqual(1, cnf.clauseCount());
-    try expectEqualSlices(u32, &.{ 0, 1 }, cnf.offsets);
-    try expectEqualSlices(i32, &.{1}, cnf.literals);
+    try expectEqual(cnf.variable_count, 1);
+    try expectEqual(cnf.clauses.items.len, 1);
+    try expectEqualSlices(i32, &.{1}, cnf.clauses.items[0]);
 }
 
 test "cnf can parse complicated clause" {
@@ -291,35 +430,15 @@ test "cnf can parse complicated clause" {
     ;
 
     const gpa = std.testing.allocator;
-    var reader: Reader = .fixed(cnf_text);
+    var reader: Io.Reader = .fixed(cnf_text);
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    try expectEqual(3, cnf.clauseCount());
-    try expectEqualSlices(u32, &.{ 0, 3, 5, 9 }, cnf.offsets);
-    try expectEqualSlices(i32, &.{ -2, 5, -3, 1, 4, -4, 1, 2, 5 }, cnf.literals);
-}
-
-test "clauseLiterals works as expected" {
-    const cnf_text =
-        \\c this is one comment
-        \\c this is another
-        \\p cnf 5 3
-        \\-2 5 -3 0
-        \\1 4 0
-        \\-4 1 2 5 0
-        \\
-    ;
-
-    const gpa = std.testing.allocator;
-    var reader: Reader = .fixed(cnf_text);
-    var cnf: @This() = try .parse(gpa, &reader);
-    defer cnf.deinit(gpa);
-
-    try expectEqual(3, cnf.clauseCount());
-    try expectEqualSlices(i32, &.{ -2, 5, -3 }, cnf.clauseLiterals(0));
-    try expectEqualSlices(i32, &.{ 1, 4 }, cnf.clauseLiterals(1));
-    try expectEqualSlices(i32, &.{ -4, 1, 2, 5 }, cnf.clauseLiterals(2));
+    try expectEqual(cnf.variable_count, 5);
+    try expectEqual(cnf.clauses.items.len, 3);
+    try expectEqualSlices(i32, &.{ -2, 5, -3 }, cnf.clauses.items[0]);
+    try expectEqualSlices(i32, &.{ 1, 4 }, cnf.clauses.items[1]);
+    try expectEqualSlices(i32, &.{ -4, 1, 2, 5 }, cnf.clauses.items[2]);
 }
 
 test "cnf rejects literals that exceed the variable count" {
@@ -331,32 +450,7 @@ test "cnf rejects literals that exceed the variable count" {
     ;
 
     const gpa = std.testing.allocator;
-    var reader: Reader = .fixed(cnf_text);
+    var reader: Io.Reader = .fixed(cnf_text);
     const cnf_error = @This().parse(gpa, &reader);
     try std.testing.expectError(error.InvalidTerm, cnf_error);
 }
-
-// test "cnf can parse all files within the test_cnf directory" {
-//     const gpa = std.testing.allocator;
-//     const cwd = std.Io.Dir.cwd();
-//     const io = std.testing.io;
-//
-//     const options: std.Io.Dir.OpenOptions = .{ .iterate = true };
-//     const dir = try cwd.openDir(io, "test_cnf", options);
-//     defer dir.close(io);
-//
-//     var iterator = dir.iterate();
-//     while (try iterator.next(io)) |entry| {
-//         if (entry.kind != .file) continue;
-//
-//         const file = try dir.openFile(io, entry.name, .{});
-//         defer file.close(io);
-//
-//         var buffer: [4096]u8 = undefined;
-//         var file_reader = file.reader(io, &buffer);
-//         const reader = &file_reader.interface;
-//
-//         var cnf: @This() = try .parse(gpa, reader);
-//         defer cnf.deinit(gpa);
-//     }
-// }

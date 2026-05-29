@@ -20,9 +20,9 @@ pub fn factorPairs(gpa: Allocator, cnf: *const Cnf) ![]const Pair {
     // verify that clauses do not contain duplicate variables
 
     if (std.debug.runtime_safety) {
-        for (0..cnf.clauseCount()) |clause| {
-            for (cnf.clauseLiterals(@intCast(clause)), 0..) |lhs, lhs_idx| {
-                for (cnf.clauseLiterals(@intCast(clause))[0..lhs_idx]) |rhs| {
+        for (cnf.clauses.items) |clause| {
+            for (clause, 0..) |lhs, lhs_idx| {
+                for (clause[0..lhs_idx]) |rhs| {
                     assert(@abs(lhs) != @abs(rhs));
                 }
             }
@@ -46,12 +46,9 @@ pub fn factorPairs(gpa: Allocator, cnf: *const Cnf) ![]const Pair {
     defer gpa.free(variables);
     @memset(variables, .none);
 
-    for (0..cnf.clauseCount()) |clause| {
-        const clause_u32: u32 = @intCast(clause);
-        const literals = cnf.clauseLiterals(clause_u32);
-
-        for (literals) |lhs| {
-            pairwise: for (literals) |rhs| {
+    for (cnf.clauses.items) |clause| {
+        for (clause) |lhs| {
+            pairwise: for (clause) |rhs| {
                 const lhs_variable: u32 = @abs(lhs);
                 const rhs_variable: u32 = @abs(rhs);
 
@@ -145,12 +142,9 @@ pub fn variablePopularity(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
     errdefer gpa.free(lengths);
     @memset(lengths, 0);
 
-    for (0..cnf.clauseCount()) |clause| {
-        const clause_u32: u32 = @intCast(clause);
-        const literals = cnf.clauseLiterals(clause_u32);
-
-        for (literals) |lhs| {
-            pairwise: for (literals) |rhs| {
+    for (cnf.clauses.items) |clause| {
+        for (clause) |lhs| {
+            pairwise: for (clause) |rhs| {
                 const lhs_variable: u32 = @abs(lhs);
                 const rhs_variable: u32 = @abs(rhs);
 
@@ -289,13 +283,13 @@ pub fn mapVariablesToClauses(gpa: Allocator, cnf: *const Cnf) !VCMapping {
     defer gpa.free(histogram);
     @memset(histogram, 0);
 
-    for (0..cnf.clauseCount()) |clause| {
-        for (cnf.clauseLiterals(@intCast(clause)), 0..) |lhs, lhs_idx| {
+    for (cnf.clauses.items) |clause| {
+        for (clause, 0..) |lhs, lhs_idx| {
             histogram[@abs(lhs)] += 1;
 
             if (std.debug.runtime_safety) {
                 // do not have duplicate variables in clauses
-                for (cnf.clauseLiterals(@intCast(clause))[0..lhs_idx]) |rhs| {
+                for (clause[0..lhs_idx]) |rhs| {
                     assert(@abs(lhs) != @abs(rhs));
                 }
             }
@@ -322,13 +316,13 @@ pub fn mapVariablesToClauses(gpa: Allocator, cnf: *const Cnf) !VCMapping {
     const clauses = try gpa.alloc(u32, literal_offset);
     errdefer gpa.free(clauses);
 
-    for (0..cnf.clauseCount()) |clause| {
-        for (cnf.clauseLiterals(@intCast(clause))) |literal| {
+    for (cnf.clauses.items, 0..) |clause, c_idx| {
+        for (clause) |literal| {
             const variable: u32 = @abs(literal);
             const upper = offsets[variable + 1];
             const remaining = histogram[variable];
             const index = upper - remaining;
-            clauses[index] = @intCast(clause);
+            clauses[index] = @intCast(c_idx);
             histogram[variable] -= 1;
         }
     }

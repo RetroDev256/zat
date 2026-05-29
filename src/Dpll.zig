@@ -21,13 +21,12 @@ pub fn dpll(self: *@This(), gpa: Allocator) !bool {
     // ------------------------------------------------------------------------
     // zero clauses is trivially satisfiable, empty clauses are unsatisfiable
 
-    if (self.cnf.clauseCount() == 0) {
+    if (self.cnf.clauses.items.len == 0) {
         return true; // no clauses, SAT
     }
 
-    for (0..self.cnf.clauseCount()) |clause| {
-        const literals = self.cnf.clauseLiterals(@intCast(clause));
-        if (literals.len == 0) return false; // empty clause, UNSAT
+    for (self.cnf.clauses.items) |clause| {
+        if (clause.len == 0) return false; // empty clause, UNSAT
     }
 
     // ------------------------------------------------------------------------
@@ -151,7 +150,7 @@ fn simplify(
             var target: ?i32 = null;
             var conflict: bool = true;
 
-            for (self.cnf.clauseLiterals(clause)) |literal| {
+            for (self.cnf.clauses.items[clause]) |literal| {
                 switch (value_map[@abs(literal)]) {
                     .unassigned => {
                         conflict = false; // unassigned literal

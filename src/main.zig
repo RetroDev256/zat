@@ -57,14 +57,25 @@ pub fn main(init: std.process.Init) !void {
     var f_reader = file.reader(init.io, &buffer);
     const reader = &f_reader.interface;
 
+    std.debug.print("c Parsing contents of {s}...\n", .{cnf_path});
     var cnf: Cnf = try .parse(init.gpa, reader);
     defer cnf.deinit(init.gpa);
 
+    std.debug.print("c {} clauses loaded...\n", .{cnf.clauses.items.len});
+    std.debug.print("c {} variables loaded...\n", .{cnf.variable_count});
+
+    const before = cnf.clauses.items.len;
+    try cnf.subsume(init.gpa);
+    const removed = before - cnf.clauses.items.len;
+    std.debug.print("c {} clauses subsumed...\n", .{removed});
+
+    std.debug.print("c Initializing solver...\n", .{});
     var solver: Dpll = .init(&cnf);
+    std.debug.print("c Running DPLL algorithm...\n", .{});
     const sat = try solver.dpll(init.gpa);
 
     std.debug.print(
-        "s {s}SATISFIABLE - {} CONFLICTS\n",
+        "s {s}SATISFIABLE - {} CONFLICTS\n\n",
         .{ if (sat) "" else "UN", solver.conflicts },
     );
 }
