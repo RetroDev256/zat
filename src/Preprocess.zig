@@ -6,6 +6,128 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Cnf = @import("Cnf.zig");
 
+// TODO: failed literal elimination (lookahead)
+// TODO: equivalent literal substitution
+// TODO: self-subsuming resolution
+// TODO: duplicate literal removal
+// TODO: apply ALL pure literals
+// TODO: resolution elimination
+// TODO: tautology elimination
+// TODO: propagate ALL units
+// TODO: vivification
+// TODO: subsumption
+
+/// assert that clauses and literals are in ascending order
+fn assertClauseOrder(self: *const @This()) !void {
+    if (!std.debug.runtime_safety) return;
+    if (self.clauses.items.len == 0) return;
+    const clauses = self.clauses.items;
+
+    if (clauses.len > 0) for (1..clauses.len) |i| {
+        assert(clauses[i - 1].len <= clauses[i].len);
+        if (clauses[i].len > 0) for (1..clauses[i].len) |x| {
+            // not only ascending, but also no duplicates
+            assert(clauses[i][x - 1] < clauses[i][x]);
+        };
+    };
+}
+
+/// sort clauses and literals into ascending order
+pub fn orderCnf(self: *@This()) void {
+    const clauses = self.clauses.items;
+
+    // Order the clauses from smallest to largest, subsume right
+    std.mem.sortUnstable([]u32, clauses, {}, lessThanClause);
+
+    for (clauses) |clause| {
+        // Order the terms in each clause from least to greatest
+        std.mem.sortUnstable(u32, clause, {}, std.sort.asc(u32));
+    }
+}
+
+/// comparison function for sorting clauses by arity
+fn lessThanClause(_: void, lhs: []u32, rhs: []u32) bool {
+    return lhs.len < rhs.len;
+}
+
+/// remove clauses that are deemed trivially redundant
+/// - eg. they are a subset of another clause
+pub fn subsume(self: *@This(), gpa: Allocator) !void {
+    if (self.clauses.items.len == 0) return;
+    const clauses = &self.clauses.items;
+
+    // sort for improved runtime
+    self.orderCnf();
+    try self.assertClauseOrder();
+
+    // Create a map of the redundant clauses
+    const redundant = try gpa.alloc(bool, clauses.len);
+    defer gpa.free(redundant);
+    @memset(redundant, false);
+
+    var a: usize = 0;
+    while (a < clauses.len) : (a += 1) {
+        if (redundant[a]) continue;
+
+        var b: usize = a + 1;
+        while (b < clauses.len) : (b += 1) {
+            if (redundant[b]) continue;
+
+            const c_a = clauses.*[a];
+            const c_b = clauses.*[b];
+            redundant[b] = subsetOf(c_a, c_b);
+        }
+    }
+
+    // Remove all the redundant clauses
+    var write: usize = 0;
+    for (clauses.*, 0..) |clause, index| {
+        if (redundant[index]) {
+            gpa.free(clause);
+        } else {
+            clauses.*[write] = clause;
+            write += 1;
+        }
+    }
+
+    // Update the number of clauses
+    clauses.len = write;
+}
+
+/// check if one clause is a subset of another - both clauses must be sorted in
+/// ascending order of terms - lhs must contain less or equal elements than rhs
+fn subsetOf(noalias lhs: []const u32, noalias rhs: []const u32) bool {
+    assert(lhs.len <= rhs.len);
+    if (std.debug.runtime_safety) {
+        if (lhs.len > 0) for (0..lhs.len - 1) |i|
+            assert(lhs[i] < lhs[i + 1]);
+        if (rhs.len > 0) for (0..rhs.len - 1) |i|
+            assert(rhs[i] < rhs[i + 1]);
+    }
+
+    var a: usize = 0;
+    var b: usize = 0;
+
+    while (a < lhs.len and b < rhs.len) {
+        const var_a = lhs[a] / 2; // convert from term to variable
+        const var_b = rhs[b] / 2; // convert from term to variable
+
+        if (var_a == var_b) {
+            // match found, advance pointers
+            a += 1;
+            b += 1;
+        } else if (var_a > var_b) {
+            // rhs is too small, advance rhs
+            b += 1;
+        } else {
+            // rhs can never contain var_a
+            return false;
+        }
+    }
+
+    return a == lhs.len;
+}
+
 const Pair = struct {
     lhs: u32,
     rhs: u32,
@@ -332,6 +454,35 @@ pub fn mapVariablesToClauses(gpa: Allocator, cnf: *const Cnf) !VCMapping {
 
 // A simple sugar to cut down on text bytes in each test
 const expectEqualSlices = std.testing.expectEqualSlices;
+const expect = std.testing.expect;
+
+test "subsetOf works with empty list" {
+    try expect(subsetOf(&.{}, &.{}));
+}
+
+test "subsetOf works with offset elements" {
+    try expect(subsetOf(&.{7}, &.{ 2, 4, 7, 9 }));
+}
+
+test "subsetOf works with two elements" {
+    try expect(subsetOf(&.{ 2, 9 }, &.{ 2, 4, 7, 9 }));
+}
+
+test "subsetOf works with equal elements" {
+    try expect(subsetOf(&.{ 2, 4, 7, 9 }, &.{ 2, 4, 7, 9 }));
+}
+
+test "subsetOf works with mixed sign elements" {
+    try expect(subsetOf(&.{ 0, 4, 7, 8 }, &.{ 1, 5, 6, 9 }));
+}
+
+test "subsetOf returns false for missing element" {
+    try expect(!subsetOf(&.{15}, &.{ 2, 4, 7 }));
+}
+
+test "subsetOf returns true for empty set subset" {
+    try expect(subsetOf(&.{}, &.{ 2, 4, 7 }));
+}
 
 fn testFactorPairs(cnf_text: []const u8, expected: []const Pair) !void {
     const gpa = std.testing.allocator;
