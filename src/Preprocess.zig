@@ -42,7 +42,7 @@ pub fn factorPairs(gpa: Allocator, cnf: *const Cnf) ![]const Pair {
     // Each variable element here is the root of a linked list, whose nodes
     // live within linked_list. This way we have random insertion without a
     // time or space tradeoff, unless we are counting random fetch / store.
-    const variables = try gpa.alloc(Index, cnf.variable_count + 1);
+    const variables = try gpa.alloc(Index, cnf.var_count + 1);
     defer gpa.free(variables);
     @memset(variables, .none);
 
@@ -133,12 +133,12 @@ pub fn variablePopularity(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
     // Each variable element here is the root of a linked list, whose nodes
     // live within linked_list. This way we have random insertion without a
     // time or space tradeoff, unless we are counting random fetch / store.
-    const variables = try gpa.alloc(u32, cnf.variable_count + 1);
+    const variables = try gpa.alloc(u32, cnf.var_count + 1);
     defer gpa.free(variables);
     @memset(variables, 0);
 
     // The length of the linked list for each variable - our output
-    const lengths = try gpa.alloc(u32, cnf.variable_count + 1);
+    const lengths = try gpa.alloc(u32, cnf.var_count + 1);
     errdefer gpa.free(lengths);
     @memset(lengths, 0);
 
@@ -187,7 +187,7 @@ pub fn variablePriority(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
     // construct a map of the number of popularities per popularity
     // count the number of distinct popularities
 
-    const pop_count = try gpa.alloc(u32, cnf.variable_count);
+    const pop_count = try gpa.alloc(u32, cnf.var_count);
     defer gpa.free(pop_count);
 
     var bucket_count: u32 = 0;
@@ -204,7 +204,7 @@ pub fn variablePriority(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
     // construct a reverse mapping from popularities to offset bucket index
     // construct a map of offsets into the destination list to place things
 
-    const pop_to_bucket = try gpa.alloc(u32, cnf.variable_count);
+    const pop_to_bucket = try gpa.alloc(u32, cnf.var_count);
     defer gpa.free(pop_to_bucket);
 
     const pop_offsets = try gpa.alloc(u32, bucket_count + 1);
@@ -215,9 +215,9 @@ pub fn variablePriority(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
     var bucket_index: u32 = 0;
     pop_offsets[0] = 0;
 
-    for (0..cnf.variable_count) |reverse| {
+    for (0..cnf.var_count) |reverse| {
         // skip popularities which do not exist
-        const index = cnf.variable_count - reverse - 1;
+        const index = cnf.var_count - reverse - 1;
         const popularity = pop_count[index];
         if (popularity == 0) continue;
 
@@ -233,7 +233,7 @@ pub fn variablePriority(gpa: Allocator, cnf: *const Cnf) ![]const u32 {
     // ------------------------------------------------------------------------
     // copy all of the most popular variable indexes into the list
 
-    const most_popular = try gpa.alloc(u32, cnf.variable_count);
+    const most_popular = try gpa.alloc(u32, cnf.var_count);
     errdefer gpa.free(most_popular);
 
     // skip variable
@@ -279,7 +279,7 @@ pub fn mapVariablesToClauses(gpa: Allocator, cnf: *const Cnf) !VCMapping {
     // ------------------------------------------------------------------------
     // count the number of clauses each variable is in, in linear time
 
-    const histogram = try gpa.alloc(u32, cnf.variable_count + 1);
+    const histogram = try gpa.alloc(u32, cnf.var_count + 1);
     defer gpa.free(histogram);
     @memset(histogram, 0);
 
@@ -299,7 +299,7 @@ pub fn mapVariablesToClauses(gpa: Allocator, cnf: *const Cnf) !VCMapping {
     // -------------------------------------------------- 1, 2 ----------------------
     // create a list of offsets into the clause list for each variable
 
-    const offsets = try gpa.alloc(u32, cnf.variable_count + 2);
+    const offsets = try gpa.alloc(u32, cnf.var_count + 2);
     errdefer gpa.free(offsets);
     offsets[0] = undefined;
     offsets[1] = 0;

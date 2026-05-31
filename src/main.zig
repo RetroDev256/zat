@@ -1,7 +1,8 @@
 const std = @import("std");
+const Bcp = @import("Bcp.zig");
 const Cnf = @import("Cnf.zig");
-const Dpll = @import("Dpll.zig");
-const Preprocess = @import("Preprocess.zig");
+// const Dpll = @import("Dpll.zig");
+// const Preprocess = @import("Preprocess.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -62,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     defer cnf.deinit(init.gpa);
 
     std.debug.print("c {} clauses loaded...\n", .{cnf.clauses.items.len});
-    std.debug.print("c {} variables loaded...\n", .{cnf.variable_count});
+    std.debug.print("c {} variables loaded...\n", .{cnf.var_count});
 
     const before = cnf.clauses.items.len;
     try cnf.subsume(init.gpa);
@@ -70,18 +71,30 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("c {} clauses subsumed...\n", .{removed});
 
     std.debug.print("c Initializing solver...\n", .{});
-    var solver: Dpll = .init(&cnf);
-    std.debug.print("c Running DPLL algorithm...\n", .{});
-    const sat = try solver.dpll(init.gpa);
+    // var solver: Dpll = .init(&cnf);
+    // std.debug.print("c Running DPLL algorithm...\n", .{});
+    // const sat = try solver.dpll(init.gpa);
 
-    std.debug.print(
-        "s {s}SATISFIABLE - {} CONFLICTS\n\n",
-        .{ if (sat) "" else "UN", solver.conflicts },
-    );
+    var bcp: Bcp = Bcp.init(init.gpa, &cnf) catch |err| {
+        if (err == error.Unsatisfiable) {
+            return std.debug.print("UNSAT\n", .{});
+        } else {
+            return err;
+        }
+    };
+    defer bcp.deinit(init.gpa);
+
+    std.debug.print("UNKNOWN\n", .{});
+
+    // std.debug.print(
+    //     "s {s}SATISFIABLE - {} CONFLICTS\n\n",
+    //     .{ if (sat) "" else "UN", solver.conflicts },
+    // );
 }
 
 test {
+    _ = &Bcp; // import tests from Bcp
     _ = &Cnf; // import tests from Cnf
-    _ = &Dpll; // import tests from Dpll
-    _ = &Preprocess; // import tests from Preprocess
+    // _ = &Dpll; // import tests from Dpll
+    // _ = &Preprocess; // import tests from Preprocess
 }

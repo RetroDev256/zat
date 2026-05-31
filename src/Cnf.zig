@@ -3,29 +3,23 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-clauses: std.ArrayList([]i32),
-variable_count: u32,
+/// each clause within the CNF, where each literal is EVEN if it is within the
+/// clause, and ODD if it is within the clause, but also inverted - to convert
+/// from literal to variable, divide by 2 - to see if it is inverted, AND by 1
+clauses: std.ArrayList([]u32),
+/// the number of variables (at maximum) within the clauses - this does not
+/// necessarily mean that there are var_count variables, but that the largest
+/// literal within any clause must not exceed 2 * var_count - due to inversion
+var_count: u32,
 
-/// Parser for a strict superset of DIMACS CNF:
-/// - comments may occur before and after the DIMACS header
-/// - comments may occur before, after, and between clauses
-/// - comments start with 'c' and terminate with a newline
-/// - the header starts with 'p' and terminate with a newline
-/// - the header line is of format "p cnf VARIABLES CLAUSES"
-/// - "VARIABLES" is the maximum variable index that may occur
-/// - "CLAUSES" is the exact number of clauses in the CNF
-/// - clauses are lists of literals separated by whitespace
-/// - literals are base-10 signed integers, sign denoting negation
-/// - literals whose absolute value exceeds VARS return an error
-/// - all clauses must end in '0', including the last clause
-/// - empty clauses (eg. "0") *are* allowed within the CNF
-/// - empty lines *are* tolerated within this CNF parser
-/// - carriage returns *are* tolerated within this parser
-/// - end-of-clauses can be marked with a % if desired
-/// - end-of-file can be marked with a 0 if desired
-/// - ending non-comment tokens return an error
+/// Parser for a superset of DIMACS CNF - supports comments, clauses (they must
+/// all end with a 0), whitespace (spaces, tabs, newlines, carriage returns),
+/// and a trailing % (to denote end of clauses). This should parse most DIMACS
+/// CNF files. NOTE: the variable count in the header is the maximum literal
+/// absolute value that may occur, and the number of clauses in the header must
+/// match the number of clauses within the file exactly.
 pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
-    var clauses: std.ArrayList([]i32) = .empty;
+    var clauses: std.ArrayList([]u32) = .empty;
     errdefer clauses.deinit(gpa);
 
     // header: "p cnf h_variables h_clauses"
@@ -62,7 +56,7 @@ pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
             continue :top_level .clauses;
         },
         .clauses => {
-            var literals: std.ArrayList(i32) = .empty;
+            var literals: std.ArrayList(u32) = .empty;
             defer literals.deinit(gpa);
 
             mid_level: switch (enum { start, clause }.start) {
@@ -84,11 +78,14 @@ pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
 
                     while (true) {
                         try tossWhitespace(reader);
-                        const term = try takeInteger(i32, reader);
-                        if (term == 0) break; // end of clause
-                        if (@abs(term) > h_variables)
+                        const raw_term = try takeInteger(i32, reader);
+                        if (raw_term == 0) break; // end of clause
+                        if (@abs(raw_term) > h_variables)
                             return error.InvalidTerm;
-                        try literals.append(gpa, term);
+
+                        const variable = @abs(raw_term) - 1;
+                        const sign = @intFromBool(raw_term < 0);
+                        try literals.append(gpa, variable * 2 + sign);
                     }
 
                     const lit_slice = try literals.toOwnedSlice(gpa);
@@ -115,7 +112,7 @@ pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
             }
 
             optional_zero: {
-                // end of file sometimes marked by 0
+                // end of file sometimes marked by 0 after a %
                 try tossWhitespace(reader);
                 const percent = reader.peekByte() catch |err| {
                     if (err == error.EndOfStream)
@@ -138,7 +135,7 @@ pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
 
             return .{
                 .clauses = clauses,
-                .variable_count = h_variables,
+                .var_count = h_variables,
             };
         },
     }
@@ -161,10 +158,11 @@ fn assertClauseOrder(self: *const @This()) !void {
     if (self.clauses.items.len == 0) return;
     const clauses = self.clauses.items;
 
-    if (clauses.len > 0) for (1..clauses) |i| {
-        assert(clauses[i - 1] < clauses[i]);
+    if (clauses.len > 0) for (1..clauses.len) |i| {
+        assert(clauses[i - 1].len <= clauses[i].len);
         if (clauses[i].len > 0) for (1..clauses[i].len) |x| {
-            assert(clauses[i][x - 1] < clauses[i][x + 1]);
+            // not only ascending, but also no duplicates
+            assert(clauses[i][x - 1] < clauses[i][x]);
         };
     };
 }
@@ -174,16 +172,16 @@ pub fn orderCnf(self: *@This()) void {
     const clauses = self.clauses.items;
 
     // Order the clauses from smallest to largest, subsume right
-    std.mem.sortUnstable([]i32, clauses, {}, lessThanClause);
+    std.mem.sortUnstable([]u32, clauses, {}, lessThanClause);
 
     for (clauses) |clause| {
         // Order the terms in each clause from least to greatest
-        std.mem.sortUnstable(i32, clause, {}, std.sort.asc(i32));
+        std.mem.sortUnstable(u32, clause, {}, std.sort.asc(u32));
     }
 }
 
 /// comparison function for sorting clauses by arity
-fn lessThanClause(_: void, lhs: []i32, rhs: []i32) bool {
+fn lessThanClause(_: void, lhs: []u32, rhs: []u32) bool {
     return lhs.len < rhs.len;
 }
 
@@ -191,9 +189,10 @@ fn lessThanClause(_: void, lhs: []i32, rhs: []i32) bool {
 /// - eg. they are a subset of another clause
 pub fn subsume(self: *@This(), gpa: Allocator) !void {
     if (self.clauses.items.len == 0) return;
-    const clauses = self.clauses.items;
+    const clauses = &self.clauses.items;
 
-    // Clauses and literals must be ordered
+    // sort for improved runtime
+    self.orderCnf();
     try self.assertClauseOrder();
 
     // Create a map of the redundant clauses
@@ -209,19 +208,19 @@ pub fn subsume(self: *@This(), gpa: Allocator) !void {
         while (b < clauses.len) : (b += 1) {
             if (redundant[b]) continue;
 
-            const c_a = clauses[a];
-            const c_b = clauses[b];
+            const c_a = clauses.*[a];
+            const c_b = clauses.*[b];
             redundant[b] = subsetOf(c_a, c_b);
         }
     }
 
     // Remove all the redundant clauses
     var write: usize = 0;
-    for (clauses, 0..) |clause, index| {
+    for (clauses.*, 0..) |clause, index| {
         if (redundant[index]) {
             gpa.free(clause);
         } else {
-            clauses[write] = clause;
+            clauses.*[write] = clause;
             write += 1;
         }
     }
@@ -232,7 +231,7 @@ pub fn subsume(self: *@This(), gpa: Allocator) !void {
 
 /// check if one clause is a subset of another - both clauses must be sorted in
 /// ascending order of terms - lhs must contain less or equal elements than rhs
-fn subsetOf(noalias lhs: []const i32, noalias rhs: []const i32) bool {
+fn subsetOf(noalias lhs: []const u32, noalias rhs: []const u32) bool {
     assert(lhs.len <= rhs.len);
     if (std.debug.runtime_safety) {
         if (lhs.len > 0) for (0..lhs.len - 1) |i|
@@ -245,15 +244,18 @@ fn subsetOf(noalias lhs: []const i32, noalias rhs: []const i32) bool {
     var b: usize = 0;
 
     while (a < lhs.len and b < rhs.len) {
-        if (lhs[a] == rhs[b]) {
+        const var_a = lhs[a] / 2; // convert from term to variable
+        const var_b = rhs[b] / 2; // convert from term to variable
+
+        if (var_a == var_b) {
             // match found, advance pointers
             a += 1;
             b += 1;
-        } else if (lhs[a] > rhs[b]) {
+        } else if (var_a > var_b) {
             // rhs is too small, advance rhs
             b += 1;
         } else {
-            // rhs can never contain lhs[a]
+            // rhs can never contain var_a
             return false;
         }
     }
@@ -263,7 +265,7 @@ fn subsetOf(noalias lhs: []const i32, noalias rhs: []const i32) bool {
 
 pub fn serialize(self: *const @This(), writer: *Io.Writer) !void {
     try writer.print("p cnf {} {}\n", .{
-        self.variable_count,
+        self.var_count,
         self.clauses.items.len,
     });
 
@@ -339,31 +341,33 @@ test "subsetOf works with empty list" {
 }
 
 test "subsetOf works with offset elements" {
-    try expect(subsetOf(&.{3}, &.{ -2, -1, 3, 4 }));
+    try expect(subsetOf(&.{7}, &.{ 2, 4, 7, 9 }));
 }
 
 test "subsetOf works with two elements" {
-    try expect(subsetOf(&.{ -1, 4 }, &.{ -2, -1, 3, 4 }));
+    try expect(subsetOf(&.{ 2, 9 }, &.{ 2, 4, 7, 9 }));
 }
 
 test "subsetOf works with equal elements" {
-    try expect(subsetOf(&.{ -2, -1, 3, 4 }, &.{ -2, -1, 3, 4 }));
+    try expect(subsetOf(&.{ 2, 4, 7, 9 }, &.{ 2, 4, 7, 9 }));
+}
+
+test "subsetOf works with mixed sign elements" {
+    try expect(subsetOf(&.{ 0, 4, 7, 8 }, &.{ 1, 5, 6, 9 }));
 }
 
 test "subsetOf returns false for missing element" {
-    try expect(!subsetOf(&.{7}, &.{ -2, -1, 3 }));
+    try expect(!subsetOf(&.{15}, &.{ 2, 4, 7 }));
 }
 
 test "subsetOf returns true for empty set subset" {
-    try expect(subsetOf(&.{}, &.{ -2, -1, 3 }));
+    try expect(subsetOf(&.{}, &.{ 2, 4, 7 }));
 }
 
 test "takeInteger takes one and only one integer" {
-    const int_str = "-123 4 -5 -5 5 0 -7";
-    var reader: Io.Reader = .fixed(int_str);
-
-    inline for (&.{ -123, 4, -5, -5, 5, 0, -7 }) |expected| {
-        const actual = try takeInteger(i32, &reader);
+    var reader: Io.Reader = .fixed("123 4 5 5 9 0 7");
+    inline for (&.{ 123, 4, 5, 5, 9, 0, 7 }) |expected| {
+        const actual = try takeInteger(u32, &reader);
         try expectEqual(expected, actual);
         try tossWhitespace(&reader);
     }
@@ -377,7 +381,7 @@ test "cnf can parse input lacking cnf clauses" {
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    try expectEqual(cnf.variable_count, 0);
+    try expectEqual(cnf.var_count, 0);
     try expectEqual(cnf.clauses.items.len, 0);
 }
 
@@ -396,7 +400,7 @@ test "cnf can parse dimacs cnf file with comments" {
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    try expectEqual(cnf.variable_count, 0);
+    try expectEqual(cnf.var_count, 0);
     try expectEqual(cnf.clauses.items.len, 0);
 }
 
@@ -412,9 +416,28 @@ test "cnf can parse one valid clause" {
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    try expectEqual(cnf.variable_count, 1);
+    try expectEqual(cnf.var_count, 1);
     try expectEqual(cnf.clauses.items.len, 1);
-    try expectEqualSlices(i32, &.{1}, cnf.clauses.items[0]);
+    try expectEqualSlices(u32, &.{0}, cnf.clauses.items[0]);
+}
+
+test "cnf does not crash with simple cnf" {
+    const cnf_text =
+        \\p cnf 2 2
+        \\1 2 0
+        \\1 -2 0
+        \\
+    ;
+
+    const gpa = std.testing.allocator;
+    var reader: Io.Reader = .fixed(cnf_text);
+    var cnf: @This() = try .parse(gpa, &reader);
+    defer cnf.deinit(gpa);
+
+    try expectEqual(cnf.var_count, 2);
+    try expectEqual(cnf.clauses.items.len, 2);
+    try expectEqualSlices(u32, &.{ 0, 2 }, cnf.clauses.items[0]);
+    try expectEqualSlices(u32, &.{ 0, 3 }, cnf.clauses.items[1]);
 }
 
 test "cnf can parse complicated clause" {
@@ -434,11 +457,11 @@ test "cnf can parse complicated clause" {
     var cnf: @This() = try .parse(gpa, &reader);
     defer cnf.deinit(gpa);
 
-    try expectEqual(cnf.variable_count, 5);
+    try expectEqual(cnf.var_count, 5);
     try expectEqual(cnf.clauses.items.len, 3);
-    try expectEqualSlices(i32, &.{ -2, 5, -3 }, cnf.clauses.items[0]);
-    try expectEqualSlices(i32, &.{ 1, 4 }, cnf.clauses.items[1]);
-    try expectEqualSlices(i32, &.{ -4, 1, 2, 5 }, cnf.clauses.items[2]);
+    try expectEqualSlices(u32, &.{ 3, 8, 5 }, cnf.clauses.items[0]);
+    try expectEqualSlices(u32, &.{ 0, 6 }, cnf.clauses.items[1]);
+    try expectEqualSlices(u32, &.{ 7, 0, 2, 8 }, cnf.clauses.items[2]);
 }
 
 test "cnf rejects literals that exceed the variable count" {
@@ -453,4 +476,25 @@ test "cnf rejects literals that exceed the variable count" {
     var reader: Io.Reader = .fixed(cnf_text);
     const cnf_error = @This().parse(gpa, &reader);
     try std.testing.expectError(error.InvalidTerm, cnf_error);
+}
+
+test "cnf parses a really weird file" {
+    const cnf_text =
+        \\c this is a comment
+        \\p cnf 5 3 -2
+        \\          5 -3 0 c this is a comment
+        \\1
+        \\4 0   -4 1 2      5 0 % 0
+    ;
+
+    const gpa = std.testing.allocator;
+    var reader: Io.Reader = .fixed(cnf_text);
+    var cnf: @This() = try .parse(gpa, &reader);
+    defer cnf.deinit(gpa);
+
+    try expectEqual(cnf.var_count, 5);
+    try expectEqual(cnf.clauses.items.len, 3);
+    try expectEqualSlices(u32, &.{ 3, 8, 5 }, cnf.clauses.items[0]);
+    try expectEqualSlices(u32, &.{ 0, 6 }, cnf.clauses.items[1]);
+    try expectEqualSlices(u32, &.{ 7, 0, 2, 8 }, cnf.clauses.items[2]);
 }

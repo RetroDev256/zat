@@ -45,7 +45,7 @@ pub fn dpll(self: *@This(), gpa: Allocator) !bool {
     defer assignments.deinit(gpa);
 
     // values for each variable: 1 if true, -1 if false, 0 if unassigned
-    const value_count: u32 = self.cnf.variable_count + 1;
+    const value_count: u32 = self.cnf.var_count + 1;
     const value_map = try gpa.alloc(Value, value_count);
     defer gpa.free(value_map);
     @memset(value_map, .unassigned);
@@ -147,7 +147,7 @@ fn simplify(
         clauses: for (vc_map.variableClauses(variable)) |clause| {
 
             // literal for unit clause
-            var target: ?i32 = null;
+            var target: ?u32 = null;
             var conflict: bool = true;
 
             for (self.cnf.clauses.items[clause]) |literal| {
@@ -160,9 +160,9 @@ fn simplify(
                         target = literal;
                     },
                     // the clause has a satisfied literal
-                    .negative => if (literal < 0) continue :clauses,
+                    .negative => if (literal & 1 == 0) continue :clauses,
                     // the clause has a satisfied literal
-                    .positive => if (literal > 0) continue :clauses,
+                    .positive => if (literal & 1 == 1) continue :clauses,
                 }
             }
 
