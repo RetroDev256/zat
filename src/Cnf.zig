@@ -141,20 +141,6 @@ pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
     }
 }
 
-pub fn serialize(self: *const @This(), writer: *Io.Writer) !void {
-    try writer.print("p cnf {} {}\n", .{
-        self.var_count,
-        self.clauses.items.len,
-    });
-
-    for (self.clauses.items) |clause| {
-        for (clause.literals) |literal| {
-            try writer.print("{} ", .{literal});
-        }
-        try writer.writeAll("0\n");
-    }
-}
-
 pub fn deinit(self: *@This(), gpa: Allocator) void {
     defer self.* = undefined;
 
@@ -163,6 +149,24 @@ pub fn deinit(self: *@This(), gpa: Allocator) void {
     }
 
     self.clauses.deinit(gpa);
+}
+
+pub fn serialize(self: *const @This(), writer: *Io.Writer) !void {
+    try writer.print("p cnf {} {}\n", .{
+        self.var_count,
+        self.clauses.items.len,
+    });
+
+    for (self.clauses.items) |clause| {
+        for (clause) |literal| {
+            if (literal & 1 == 1) {
+                try writer.print("-{} ", .{literal / 2});
+            } else {
+                try writer.print("{} ", .{literal / 2});
+            }
+        }
+        try writer.writeAll("0\n");
+    }
 }
 
 fn takeInteger(comptime T: type, reader: *Io.Reader) !T {
