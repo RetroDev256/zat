@@ -1,7 +1,8 @@
 const std = @import("std");
 // const Bcp = @import("Bcp.zig");
+const Cdcl = @import("Cdcl.zig");
 const Cnf = @import("Cnf.zig");
-const Dp = @import("Dp.zig");
+// const Dp = @import("Dp.zig");
 // const Dpll = @import("Dpll.zig");
 // const Preprocess = @import("Preprocess.zig");
 const Allocator = std.mem.Allocator;
@@ -15,10 +16,9 @@ const Io = std.Io;
 // - variables that occur least often first?
 
 fn parseCli(args: []const [:0]const u8) ![]const u8 {
-    var name: []const u8 = "zat";
     const usage =
         \\USAGE:
-        \\{s} [--help] INPUT
+        \\zat [--help] INPUT
         \\  INPUT - valid DIMACS CNF file path
         \\  --help - prints this usage string
         \\
@@ -28,11 +28,9 @@ fn parseCli(args: []const [:0]const u8) ![]const u8 {
     ;
 
     if (args.len > 0) {
-        name = args[0];
-
         for (args[1..]) |arg| {
             if (std.mem.eql(u8, arg, "--help")) {
-                std.debug.print(usage, .{name});
+                std.debug.print(usage, .{});
                 std.process.exit(0);
             }
         }
@@ -42,7 +40,7 @@ fn parseCli(args: []const [:0]const u8) ![]const u8 {
         }
     }
 
-    std.debug.print(usage, .{name});
+    std.debug.print(usage, .{});
     std.process.exit(2);
 }
 
@@ -59,31 +57,28 @@ pub fn main(init: std.process.Init) !void {
     var f_reader = file.reader(init.io, &buffer);
     const reader = &f_reader.interface;
 
-    std.debug.print("c Parsing contents of {s}...\n", .{cnf_path});
-    var cnf: Cnf = try .parse(init.gpa, reader);
-    defer cnf.deinit(init.gpa);
-
-    std.debug.print("c {} clauses loaded...\n", .{cnf.clauses.items.len});
-    std.debug.print("c {} variables loaded...\n", .{cnf.var_count});
-
-    // const before = cnf.clauses.items.len;
-    // try cnf.subsume(init.gpa);
-    // const removed = before - cnf.clauses.items.len;
-    // std.debug.print("c {} clauses subsumed...\n", .{removed});
-
     std.debug.print("c Initializing solver...\n", .{});
-    var solver: Dp = .init(&cnf);
-    std.debug.print("c Running DP algorithm...\n", .{});
-    const sat = try solver.solve(init.gpa);
 
-    std.debug.print(
-        "s {s}SATISFIABLE\n\n",
-        .{if (sat) "" else "UN"},
-    );
+    var solver = Cdcl.init(init.gpa, reader) catch |err| {
+        if (err == error.Unsatisfiable) {
+            return std.debug.print("s UNSATISFIABLE\n\n", .{});
+        } else return err;
+    };
+
+    std.debug.print("c Running CDCL algorithm...\n", .{});
+
+    if (try solver.cdcl(init.gpa)) {
+        std.debug.print("s SATISFIABLE\n", .{});
+    } else {
+        std.debug.print("s UNSATISFIABLE\n", .{});
+    }
+
+    std.debug.print("\n", .{});
 }
 
 test {
     // _ = &Bcp; // import tests from Bcp
+    _ = &Cdcl; // import tests from Cdcl
     _ = &Cnf; // import tests from Cnf
     // _ = &Dpll; // import tests from Dpll
     // _ = &Preprocess; // import tests from Preprocess

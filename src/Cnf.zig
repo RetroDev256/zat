@@ -239,6 +239,17 @@ test "cnf can parse input lacking cnf clauses" {
     try expectEqual(cnf.clauses.items.len, 0);
 }
 
+test "cnf parses single 1 as a positive literal" {
+    const gpa = std.testing.allocator;
+    var reader: Io.Reader = .fixed("p cnf 1 1 1 0");
+    var cnf: @This() = try .parse(gpa, &reader);
+    defer cnf.deinit(gpa);
+
+    try expectEqual(1, cnf.var_count);
+    try expectEqual(1, cnf.clauses.items.len);
+    try expectEqualSlices(u32, &.{0}, cnf.clauses.items[0]);
+}
+
 test "cnf can parse dimacs cnf file with comments" {
     const cnf_text =
         \\c this is one comment
