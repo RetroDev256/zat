@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
             return std.debug.print("s UNSATISFIABLE\n\n", .{});
         } else return err;
     };
+    defer solver.deinit(init.gpa);
 
     std.debug.print("c Running CDCL algorithm...\n", .{});
 
