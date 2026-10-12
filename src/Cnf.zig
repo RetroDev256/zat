@@ -3,10 +3,10 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
-/// each clause within the CNF, where each literal is EVEN if it is within the
-/// clause, and ODD if it is within the clause, but also inverted - to convert
-/// from literal to variable, divide by 2 - to see if it is inverted, AND by 1
-clauses: std.ArrayList([]u32),
+/// each clause within the CNF is stored as a slice of literals - each literal
+/// is a signed integer, where the sign denotes negation - to convert to a
+/// variable, use the @abs() builtin.
+clauses: std.ArrayList([]i32),
 /// the number of variables (at maximum) within the clauses - this does not
 /// necessarily mean that there are var_count variables, but that the largest
 /// literal within any clause must not exceed 2 * var_count - due to inversion
@@ -19,7 +19,7 @@ var_count: u32,
 /// absolute value that may occur, and the number of clauses in the header must
 /// match the number of clauses within the file exactly.
 pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
-    var clauses: std.ArrayList([]u32) = .empty;
+    var clauses: std.ArrayList([]i32) = .empty;
     errdefer clauses.deinit(gpa);
 
     // header: "p cnf h_variables h_clauses"
@@ -56,7 +56,7 @@ pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
             continue :top_level .clauses;
         },
         .clauses => {
-            var literals: std.ArrayList(u32) = .empty;
+            var literals: std.ArrayList(i32) = .empty;
             defer literals.deinit(gpa);
 
             mid_level: switch (enum { start, clause }.start) {
@@ -82,10 +82,7 @@ pub fn parse(gpa: Allocator, reader: *Io.Reader) !@This() {
                         if (raw_term == 0) break; // end of clause
                         if (@abs(raw_term) > h_variables)
                             return error.InvalidTerm;
-
-                        const variable = @abs(raw_term) - 1;
-                        const sign = @intFromBool(raw_term < 0);
-                        try literals.append(gpa, variable * 2 + sign);
+                        try literals.append(gpa, raw_term);
                     }
 
                     const lit_slice = try literals.toOwnedSlice(gpa);
@@ -149,24 +146,6 @@ pub fn deinit(self: *@This(), gpa: Allocator) void {
     }
 
     self.clauses.deinit(gpa);
-}
-
-pub fn serialize(self: *const @This(), writer: *Io.Writer) !void {
-    try writer.print("p cnf {} {}\n", .{
-        self.var_count,
-        self.clauses.items.len,
-    });
-
-    for (self.clauses.items) |clause| {
-        for (clause) |literal| {
-            if (literal & 1 == 1) {
-                try writer.print("-{} ", .{literal / 2});
-            } else {
-                try writer.print("{} ", .{literal / 2});
-            }
-        }
-        try writer.writeAll("0\n");
-    }
 }
 
 fn takeInteger(comptime T: type, reader: *Io.Reader) !T {
@@ -247,7 +226,7 @@ test "cnf parses single 1 as a positive literal" {
 
     try expectEqual(1, cnf.var_count);
     try expectEqual(1, cnf.clauses.items.len);
-    try expectEqualSlices(u32, &.{0}, cnf.clauses.items[0]);
+    try expectEqualSlices(i32, &.{1}, cnf.clauses.items[0]);
 }
 
 test "cnf can parse dimacs cnf file with comments" {
@@ -283,7 +262,7 @@ test "cnf can parse one valid clause" {
 
     try expectEqual(cnf.var_count, 1);
     try expectEqual(cnf.clauses.items.len, 1);
-    try expectEqualSlices(u32, &.{0}, cnf.clauses.items[0]);
+    try expectEqualSlices(i32, &.{1}, cnf.clauses.items[0]);
 }
 
 test "cnf does not crash with simple cnf" {
@@ -301,8 +280,8 @@ test "cnf does not crash with simple cnf" {
 
     try expectEqual(cnf.var_count, 2);
     try expectEqual(cnf.clauses.items.len, 2);
-    try expectEqualSlices(u32, &.{ 0, 2 }, cnf.clauses.items[0]);
-    try expectEqualSlices(u32, &.{ 0, 3 }, cnf.clauses.items[1]);
+    try expectEqualSlices(i32, &.{ 1, 2 }, cnf.clauses.items[0]);
+    try expectEqualSlices(i32, &.{ 1, -2 }, cnf.clauses.items[1]);
 }
 
 test "cnf can parse complicated clause" {
@@ -324,9 +303,9 @@ test "cnf can parse complicated clause" {
 
     try expectEqual(cnf.var_count, 5);
     try expectEqual(cnf.clauses.items.len, 3);
-    try expectEqualSlices(u32, &.{ 3, 8, 5 }, cnf.clauses.items[0]);
-    try expectEqualSlices(u32, &.{ 0, 6 }, cnf.clauses.items[1]);
-    try expectEqualSlices(u32, &.{ 7, 0, 2, 8 }, cnf.clauses.items[2]);
+    try expectEqualSlices(i32, &.{ -2, 5, -3 }, cnf.clauses.items[0]);
+    try expectEqualSlices(i32, &.{ 1, 4 }, cnf.clauses.items[1]);
+    try expectEqualSlices(i32, &.{ -4, 1, 2, 5 }, cnf.clauses.items[2]);
 }
 
 test "cnf rejects literals that exceed the variable count" {
@@ -359,7 +338,7 @@ test "cnf parses a really weird file" {
 
     try expectEqual(cnf.var_count, 5);
     try expectEqual(cnf.clauses.items.len, 3);
-    try expectEqualSlices(u32, &.{ 3, 8, 5 }, cnf.clauses.items[0]);
-    try expectEqualSlices(u32, &.{ 0, 6 }, cnf.clauses.items[1]);
-    try expectEqualSlices(u32, &.{ 7, 0, 2, 8 }, cnf.clauses.items[2]);
+    try expectEqualSlices(i32, &.{ -2, 5, -3 }, cnf.clauses.items[0]);
+    try expectEqualSlices(i32, &.{ 1, 4 }, cnf.clauses.items[1]);
+    try expectEqualSlices(i32, &.{ -4, 1, 2, 5 }, cnf.clauses.items[2]);
 }

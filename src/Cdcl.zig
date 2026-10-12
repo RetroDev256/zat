@@ -16,12 +16,13 @@ const Value = enum(u8) {
     /// variable is TRUE
     pos,
 
-    fn init(literal: u32) @This() {
-        return switch (literal & 1) {
-            0 => .pos,
-            1 => .neg,
-            else => unreachable,
-        };
+    fn init(literal: i32) @This() {
+        if (literal < 0)
+            return .neg
+        else if (literal > 0)
+            return .pos
+        else
+            return .none;
     }
 };
 
@@ -32,8 +33,8 @@ const Reason = enum(u32) {
     _,
 
     fn init(clause: anytype) @This() {
-        assert(clause != @intFromEnum(@This().none));
-        return @enumFromInt(clause);
+        assert(clause != @backingInt(@This().none));
+        return @fromBackingInt(@intCast(clause));
     }
 };
 
@@ -43,11 +44,11 @@ const Level = enum(u32) {
     _,
 
     fn init(level: u32) @This() {
-        return @enumFromInt(level);
+        return @fromBackingInt(@intCast(level));
     }
 
     fn next(self: @This()) @This() {
-        return .init(@intFromEnum(self) + 1);
+        return .init(@backingInt(self) + 1);
     }
 };
 
@@ -58,7 +59,7 @@ reasons: []Reason,
 /// last explicitly assigned literal - indexed by variable
 levels: []Level,
 /// chronological history of literal assignments - stack
-trail: List(u32),
+trail: List(i32),
 /// conjunctive normal form clauses - owned by this CDCL
 cnf: Cnf,
 
@@ -67,18 +68,19 @@ pub fn init(gpa: Allocator, reader: *Io.Reader) !@This() {
 
     self.cnf = try .parse(gpa, reader);
     errdefer self.cnf.deinit(gpa);
-    self.values = try gpa.alloc(Value, self.cnf.var_count);
+    self.values = try gpa.alloc(Value, self.cnf.var_count + 1);
     errdefer gpa.free(self.values);
-    self.reasons = try gpa.alloc(Reason, self.cnf.var_count);
+    self.reasons = try gpa.alloc(Reason, self.cnf.var_count + 1);
     errdefer gpa.free(self.reasons);
-    self.levels = try gpa.alloc(Level, self.cnf.var_count);
+    self.levels = try gpa.alloc(Level, self.cnf.var_count + 1);
     errdefer gpa.free(self.levels);
-    self.trail = try .initCapacity(gpa, self.cnf.var_count);
+    self.trail = try .initCapacity(gpa, self.cnf.var_count + 1);
     errdefer self.trail.deinit(gpa);
 
     @memset(self.values, .none);
 
     const clause_count = self.cnf.clauses.items.len;
+    errdefer self.cnf.clauses.items.len = clause_count;
 
     for (0..clause_count) |clause_index| {
         // incrementally add each clause into consideration
@@ -87,10 +89,9 @@ pub fn init(gpa: Allocator, reader: *Io.Reader) !@This() {
         const clause = self.cnf.clauses.items[clause_index];
 
         // TODO: collapse clauseUnsatisfied with unitClause
-        if (clauseUnsatisfied(self.values, clause)) {
-            return error.Unsatisfiable;
-        } else if (unitClause(self.values, clause)) |literal| {
-            if (try self.bcp(gpa, literal, .base)) |_| {
+        if (unitClause(self.values, clause)) |literal| {
+            if (literal == 0) return error.Unsatisfiable;
+            if (try self.bcp(gpa, literal, .none, .base)) |_| {
                 return error.Unsatisfiable;
             }
         } else {
@@ -111,9 +112,9 @@ pub fn deinit(self: *@This(), gpa: Allocator) void {
 }
 
 /// check if a clause contains a variable - if so, return true
-fn clauseContains(clause: []const u32, literal: u32) bool {
+fn clauseContains(clause: []const i32, literal: i32) bool {
     for (clause) |check| {
-        if (check / 2 == literal / 2) {
+        if (@abs(check) == @abs(literal)) {
             return true;
         }
     }
@@ -121,21 +122,22 @@ fn clauseContains(clause: []const u32, literal: u32) bool {
 }
 
 /// check if a clause is a unit clause - if so, return the literal
-fn unitClause(values: []const Value, clause: []const u32) ?u32 {
-    var unit: ?u32 = null;
+/// if the return value is 0, the clause is unsatisfied
+fn unitClause(values: []const Value, clause: []const i32) ?i32 {
+    var unit: i32 = 0;
 
     for (clause) |literal| {
-        switch (values[literal / 2]) {
+        switch (values[@abs(literal)]) {
             .none => {
                 // more than one unassigned variable
-                if (unit != null) return null;
+                if (unit != 0) return null;
                 // found one unassigned variable
                 unit = literal;
             },
             // one literal has already been satisfied
-            .neg => if (literal & 1 == 1) return null,
+            .neg => if (literal < 0) return null,
             // one literal has already been satisfied
-            .pos => if (literal & 1 == 0) return null,
+            .pos => if (literal > 0) return null,
         }
     }
 
@@ -143,15 +145,15 @@ fn unitClause(values: []const Value, clause: []const u32) ?u32 {
 }
 
 /// return true iff a clause is unsatisfied
-fn clauseUnsatisfied(values: []const Value, clause: []const u32) bool {
+fn clauseUnsatisfied(values: []const Value, clause: []const i32) bool {
     for (clause) |literal| {
-        switch (values[literal / 2]) {
+        switch (values[@abs(literal)]) {
             // literal in clause is unassigned
             .none => return false,
             // literal in clause is already satisfied
-            .neg => if (literal & 1 == 1) return false,
+            .neg => if (literal < 0) return false,
             // literal in clause is already satisfied
-            .pos => if (literal & 1 == 0) return false,
+            .pos => if (literal > 0) return false,
         }
     }
 
@@ -159,43 +161,43 @@ fn clauseUnsatisfied(values: []const Value, clause: []const u32) bool {
 }
 
 /// record a literal assignment with reason clause index and level
-fn assign(self: *@This(), literal: u32, reason: Reason, level: Level) void {
+fn assign(self: *@This(), literal: i32, reason: Reason, level: Level) void {
     self.trail.appendAssumeCapacity(literal);
-    self.values[literal / 2] = .init(literal);
-    self.reasons[literal / 2] = reason;
-    self.levels[literal / 2] = level;
+    self.values[@abs(literal)] = .init(literal);
+    self.reasons[@abs(literal)] = reason;
+    self.levels[@abs(literal)] = level;
 }
 
 /// Propagates changes for a literal - returns null if there
 /// were no conflicts, else returns the conflict clause index.
-fn bcp(self: *@This(), gpa: Allocator, literal: u32, level: Level) !?u32 {
-    var literals: List(u32) = .empty;
+fn bcp(self: *@This(), gpa: Allocator, literal: i32, reason: Reason, level: Level) !?u32 {
+    var literals: List(i32) = .empty;
     defer literals.deinit(gpa);
 
-    self.assign(literal, .none, level);
+    self.assign(literal, reason, level);
     try literals.append(gpa, literal);
 
-    std.debug.print("{s:-^40}\n", .{" STARTING BCP "});
-    defer std.debug.print("{s:-^40}\n", .{" ENDING BCP "});
+    // std.debug.print("{s:-^40}\n", .{" STARTING BCP "});
+    // defer std.debug.print("{s:-^40}\n", .{" ENDING BCP "});
 
-    std.debug.print("assigned literals: ", .{});
+    // std.debug.print("assigned literals: ", .{});
     for (self.values, 0..) |value, variable| {
         switch (value) {
-            .neg => printLiteral(@intCast(variable * 2 + 1)),
-            .pos => printLiteral(@intCast(variable * 2)),
+            .neg => printLiteral(-@as(i32, @intCast(variable))),
+            .pos => printLiteral(@intCast(variable)),
             .none => continue,
         }
 
         if (variable + 1 < self.values.len) {
-            std.debug.print(" ", .{});
+            // std.debug.print(" ", .{});
         }
     }
-    std.debug.print("\n", .{});
+    // std.debug.print("\n", .{});
 
     while (literals.pop()) |check| {
-        std.debug.print("Considering clauses containing literal ", .{});
+        // std.debug.print("Considering clauses containing literal ", .{});
         printLiteral(check);
-        std.debug.print("\n", .{});
+        // std.debug.print("\n", .{});
 
         for (0..self.cnf.clauses.items.len) |scan_index| {
             const scan_clause = self.cnf.clauses.items[scan_index];
@@ -203,24 +205,25 @@ fn bcp(self: *@This(), gpa: Allocator, literal: u32, level: Level) !?u32 {
             // clauses without the variable can be skipped
             if (!clauseContains(scan_clause, check)) continue;
 
-            std.debug.print("considering clause:\n  ", .{});
+            // std.debug.print("considering clause:\n  ", .{});
             printClause(scan_clause);
-            std.debug.print("\n", .{});
+            // std.debug.print("\n", .{});
 
             // propagate a literal if it's clause is a unit
             if (unitClause(self.values, scan_clause)) |unit| {
-                assert(self.values[unit / 2] == .none);
+                if (unit == 0) return @intCast(scan_index);
+                assert(self.values[@abs(unit)] == .none);
 
-                std.debug.print("BCP - assigning literal: ", .{});
+                // std.debug.print("BCP - assigning literal: ", .{});
                 printLiteral(unit);
-                std.debug.print(" to level {}\n", .{level});
+                // std.debug.print(" to level {}\n", .{level});
 
                 self.assign(unit, .init(scan_index), level);
                 try literals.append(gpa, unit);
 
                 continue;
             } else {
-                std.debug.print("clause not unit\n", .{});
+                // std.debug.print("clause not unit\n", .{});
             }
 
             if (clauseUnsatisfied(self.values, scan_clause)) {
@@ -233,8 +236,8 @@ fn bcp(self: *@This(), gpa: Allocator, literal: u32, level: Level) !?u32 {
 }
 
 /// pick a variable to branch on during CDCL
-fn selectBranch(self: *const @This()) ?u32 {
-    for (0..self.values.len) |root| {
+fn selectBranch(self: *const @This()) ?i32 {
+    for (1..self.values.len) |root| {
         if (self.values[root] == .none) {
             return @intCast(root);
         }
@@ -245,14 +248,14 @@ fn selectBranch(self: *const @This()) ?u32 {
 
 /// combining two clauses together for deriving conflicting clauses
 /// TODO make this so that one clause (a list) can absorb another (a slice)
-fn combine(gpa: Allocator, a: []const u32, b: []const u32) ![]u32 {
-    var result: List(u32) = try .initCapacity(gpa, a.len + b.len);
+fn combine(gpa: Allocator, a: []const i32, b: []const i32) ![]i32 {
+    var result: List(i32) = try .initCapacity(gpa, a.len + b.len);
     defer result.deinit(gpa);
 
     if (std.debug.runtime_safety) {
         // assumption - neither a nor b contain duplicate variables
-        for (a, 0..) |x, i| for (a[0..i]) |y| assert(x / 2 != y / 2);
-        for (b, 0..) |x, i| for (b[0..i]) |y| assert(x / 2 != y / 2);
+        for (a, 0..) |x, i| for (a[0..i]) |y| assert(@abs(x) != @abs(y));
+        for (b, 0..) |x, i| for (b[0..i]) |y| assert(@abs(x) != @abs(y));
     }
 
     // When adding literals from clause a, check that the negative literal does
@@ -261,7 +264,7 @@ fn combine(gpa: Allocator, a: []const u32, b: []const u32) ![]u32 {
 
     outer: for (a) |x| {
         for (b) |y| {
-            if (x == y ^ 1) {
+            if (x == -y) {
                 continue :outer;
             }
         }
@@ -274,7 +277,7 @@ fn combine(gpa: Allocator, a: []const u32, b: []const u32) ![]u32 {
 
     outer: for (b) |x| {
         for (a) |y| {
-            if (x / 2 == y / 2) {
+            if (@abs(x) == @abs(y)) {
                 continue :outer;
             }
         }
@@ -285,11 +288,11 @@ fn combine(gpa: Allocator, a: []const u32, b: []const u32) ![]u32 {
 }
 
 /// return true if there are at least two identical conflict levels
-fn needResolve(self: *const @This(), conflict: []const u32, level: Level) bool {
+fn needResolve(self: *const @This(), conflict: []const i32, level: Level) bool {
     var found: bool = false;
 
     for (conflict) |literal| {
-        if (self.levels[literal / 2] == level) {
+        if (self.levels[@abs(literal)] == level) {
             if (found) return true;
             found = true;
         }
@@ -299,12 +302,12 @@ fn needResolve(self: *const @This(), conflict: []const u32, level: Level) bool {
 }
 
 /// return the most recent assigned literal from the list
-fn mostRecent(self: *const @This(), literals: []const u32) ?u32 {
+fn mostRecent(self: *const @This(), literals: []const i32) ?i32 {
     for (0..self.trail.items.len) |index| {
         const reverse_index = self.trail.items.len - index - 1;
         const trail_literal = self.trail.items[reverse_index];
         for (literals) |check_literal| {
-            if (trail_literal / 2 == check_literal / 2) {
+            if (@abs(trail_literal) == @abs(check_literal)) {
                 return trail_literal;
             }
         }
@@ -315,22 +318,22 @@ fn mostRecent(self: *const @This(), literals: []const u32) ?u32 {
 }
 
 /// return the reason clause for a literal, or null if assigned
-/// TODO: try simplifying so that I can remove the literal / 2 here
-fn reasonClause(self: *const @This(), literal: u32) ?[]const u32 {
-    const reason = self.reasons[literal / 2];
+/// TODO: try simplifying so that I can remove the @abs(literal) here
+fn reasonClause(self: *const @This(), literal: i32) ?[]const i32 {
+    const reason = self.reasons[@abs(literal)];
     if (reason == .none) return null;
-    return self.cnf.clauses.items[@intFromEnum(reason)];
+    return self.cnf.clauses.items[@backingInt(reason)];
 }
 
 /// derive a conflicting clause from the last assignment
-fn resolve(self: *const @This(), gpa: Allocator, clause: []const u32) ![]u32 {
+fn resolve(self: *const @This(), gpa: Allocator, clause: []const i32) ![]i32 {
 
     // 1. the last literal triggered the conflict because conflict_root was set
-    const last_literal = self.trail.getLast() orelse unreachable;
-    const conflict_level = self.levels[last_literal / 2];
+    const last_literal = self.trail.getLast();
+    const conflict_level = self.levels[@abs(last_literal)];
 
     // 2. we are deriving another conflict clause, it is called "conflict"
-    var conflict: List(u32) = .fromOwnedSlice(try gpa.dupe(u32, clause));
+    var conflict: List(i32) = .fromOwnedSlice(try gpa.dupe(i32, clause));
     defer conflict.deinit(gpa);
 
     var step: usize = 0;
@@ -359,20 +362,17 @@ fn resolve(self: *const @This(), gpa: Allocator, clause: []const u32) ![]u32 {
 // TODO: backtrack to the correct level or completely restart, because we are not
 // currently backtracking far enough and it's screwing up the solver (infinite loops)
 
-fn printLiteral(literal: u32) void {
-    if (literal % 2 == 0) {
-        std.debug.print("{}", .{(literal / 2) + 1});
-    } else {
-        std.debug.print("-{}", .{(literal / 2) + 1});
-    }
+fn printLiteral(literal: i32) void {
+    _ = literal;
+    // std.debug.print("{}", .{literal});
 }
 
-fn printClause(clause: []const u32) void {
+fn printClause(clause: []const i32) void {
     for (clause) |literal| {
         printLiteral(literal);
-        std.debug.print(" ", .{});
+        // std.debug.print(" ", .{});
     }
-    std.debug.print("0", .{});
+    // std.debug.print("0", .{});
 }
 
 /// return true iff satisfiable, return false iff unsatisfiable
@@ -380,115 +380,115 @@ pub fn cdcl(self: *@This(), gpa: Allocator) !bool {
     var conflict_count: u64 = 0;
 
     while (true) {
-        std.debug.print("{s:-^80}\n", .{" CDCL INFORMATION "});
+        // std.debug.print("{s:-^80}\n", .{" CDCL INFORMATION "});
 
-        std.debug.print("assigned literals: ", .{});
+        // std.debug.print("assigned literals: ", .{});
         for (self.values, 0..) |value, variable| {
             switch (value) {
-                .neg => printLiteral(@intCast(variable * 2 + 1)),
-                .pos => printLiteral(@intCast(variable * 2)),
+                .neg => printLiteral(-@as(i32, @intCast(variable))),
+                .pos => printLiteral(@intCast(variable)),
                 .none => continue,
             }
 
             if (variable + 1 < self.values.len) {
-                std.debug.print(" ", .{});
+                // std.debug.print(" ", .{});
             }
         }
-        std.debug.print("\n", .{});
+        // std.debug.print("\n", .{});
 
-        std.debug.print("current clauses:\n", .{});
+        // std.debug.print("current clauses:\n", .{});
         for (self.cnf.clauses.items) |clause| {
-            std.debug.print("  ", .{});
+            // std.debug.print("  ", .{});
             printClause(clause);
-            std.debug.print("\n", .{});
+            // std.debug.print("\n", .{});
         }
 
-        std.debug.print("{s:-^80}\n", .{" STARTING CDCL "});
+        // std.debug.print("{s:-^80}\n", .{" STARTING CDCL "});
 
         // pick the variable to branch on, otherwise satisfied
         const root = self.selectBranch() orelse return true;
-        std.debug.print("variable to assign: {}\n", .{root + 1});
+        // std.debug.print("variable to assign: {}\n", .{root + 1});
 
         const level: Level = blk: {
             if (self.trail.items.len == 0) break :blk .init(1);
-            const literal = self.trail.getLast() orelse unreachable;
-            break :blk self.levels[literal / 2].next();
+            const literal = self.trail.getLast();
+            break :blk self.levels[@abs(literal)].next();
         };
 
-        std.debug.print("level of decision: {}\n", .{level});
+        // std.debug.print("level of decision: {}\n", .{level});
 
         // attempt bcp with the negative literal
-        if (try self.bcp(gpa, root * 2 + 1, level)) |conflict_index| {
-            const conflict = self.cnf.clauses.items[conflict_index];
-            std.debug.print("conflict found:\n  ", .{});
-            printClause(conflict);
-            std.debug.print("\n", .{});
-            conflict_count += 1;
+        if (try self.bcp(gpa, -root, .none, level)) |c_index| {
+            var conflict_index = c_index;
 
-            // resolve the conflict clause and backtrack
-            const resolved = try self.resolve(gpa, conflict);
-            std.debug.print("resolved clause:\n  ", .{});
-            printClause(resolved);
-            std.debug.print("\n", .{});
-            errdefer gpa.free(resolved);
+            while (true) {
+                const conflict = self.cnf.clauses.items[conflict_index];
+                if (self.levels[@abs(self.trail.getLast())] == .base) return false;
+                // std.debug.print("conflict found:\n  ", .{});
+                printClause(conflict);
+                // std.debug.print("\n", .{});
+                conflict_count += 1;
 
-            // add the derived clause to the CNF
-            try self.cnf.clauses.append(gpa, resolved);
+                // resolve the conflict clause and backtrack
+                const resolved = try self.resolve(gpa, conflict);
+                // std.debug.print("resolved clause:\n  ", .{});
+                printClause(resolved);
+                // std.debug.print("\n", .{});
+                errdefer gpa.free(resolved);
 
-            // check if we have proven unsatisfiable
-            if (resolved.len == 0) {
-                std.debug.print("length = 0, so problem is UNSAT\n", .{});
-                return false;
-            }
+                // add the derived clause to the CNF
+                self.cnf.clauses.append(gpa, resolved) catch |err| {
+                    gpa.free(resolved);
+                    return err;
+                };
 
-            // ----------------------------------------------------------------
-            // TODO: BACKTRACK TO WHERE THE DERIVED CLAUSE IS A UNIT. PROPAGATE
-            // THAT UNIT CLAUSE VALUE. ALSO MAKE SURE TO PROPAGATE TO A BOUNDARY
-            // OF WHERE WE HAVE JUST PROPAGATED A DECISION.
+                // check if we have proven unsatisfiable
+                if (resolved.len == 0) {
+                    // std.debug.print("length = 0, so problem is UNSAT\n", .{});
+                    return false;
+                }
 
-            while (clauseUnsatisfied(self.values, resolved)) {
-                std.debug.print("resolved clause is still unsatisfied.\n", .{});
-                if (self.trail.pop()) |literal| {
-                    std.debug.print("unassigning literal ", .{});
-                    printLiteral(literal);
-                    std.debug.print("\n", .{});
-                    self.values[literal / 2] = .none;
-                } else return false;
-            }
+                // ----------------------------------------------------------------
+                // TODO: BACKTRACK TO WHERE THE DERIVED CLAUSE IS A UNIT. PROPAGATE
+                // THAT UNIT CLAUSE VALUE. ALSO MAKE SURE TO PROPAGATE TO A BOUNDARY
+                // OF WHERE WE HAVE JUST PROPAGATED A DECISION.
 
-            // THIS CODE RESTARTS BECAUSE WE AREN'T BACKTRACKING CORRECTLY
-            while (self.trail.getLast()) |literal| {
-                if (self.levels[literal / 2] == .base) break;
-                self.trail.items.len -= 1;
-                std.debug.print("unassigning literal ", .{});
-                printLiteral(literal);
-                std.debug.print("\n", .{});
-                self.values[literal / 2] = .none;
-            }
+                var backtrack_level: Level = .base;
+                var resolved_lit: ?i32 = null;
 
-            if (resolved.len == 1) {
-                // go back to the base assignments
-                while (self.trail.getLast()) |literal| {
-                    if (self.levels[literal / 2] == .base) break;
-                    self.values[literal / 2] = .none;
+                for (resolved) |literal| {
+                    const lit_level = @backingInt(self.levels[@abs(literal)]);
+                    if (lit_level > @backingInt(backtrack_level)) {
+                        backtrack_level = @fromBackingInt(@intCast(lit_level - 1));
+                        resolved_lit = literal;
+                    }
+                }
+
+                while (self.trail.items.len > 0) {
+                    const literal = self.trail.getLast();
+                    if (self.levels[@abs(literal)] == backtrack_level) break;
+                    self.values[@abs(literal)] = .none;
                     self.trail.items.len -= 1;
                 }
 
-                std.debug.print("resolved[0]: ", .{});
-                printLiteral(resolved[0]);
-                std.debug.print("\n", .{});
-
-                if (try self.bcp(gpa, resolved[0], .base)) |_| {
-                    return false; // unsatisfiable
+                if (resolved_lit) |lit| {
+                    // TODO: somehow make this work
+                    if (try self.bcp(gpa, lit, .init(self.cnf.clauses.items.len - 1), backtrack_level)) |c2_index| {
+                        // std.debug.print("hit conflict.\n", .{});
+                        conflict_index = c2_index;
+                        continue; // HIT CONFLICT
+                    }
                 }
+
+                break; // NO CONFLICT
             }
 
-            std.debug.print("number of clauses: {}\n", .{self.cnf.clauses.items.len});
+            // std.debug.print("number of clauses: {}\n", .{self.cnf.clauses.items.len});
         } else {
-            std.debug.print("no conflict with decision.\n", .{});
+            // std.debug.print("no conflict with decision.\n", .{});
         }
 
-        std.debug.print("\n", .{});
+        // std.debug.print("\n", .{});
     }
 }
 
@@ -505,9 +505,9 @@ test "initialization works with empty CNF" {
     var self: @This() = try .init(gpa, &reader);
     defer self.deinit(gpa);
 
-    try expectEqual(0, self.values.len);
-    try expectEqual(0, self.reasons.len);
-    try expectEqual(0, self.levels.len);
+    try expectEqual(1, self.values.len);
+    try expectEqual(1, self.reasons.len);
+    try expectEqual(1, self.levels.len);
     try expectEqual(0, self.trail.items.len);
 }
 
@@ -551,7 +551,7 @@ test "initialization does not say UNSAT for trivial SAT" {
 }
 
 test "clause is not a unit clause, no terms" {
-    try expectEqual(null, unitClause(&.{}, &.{}));
+    try expectEqual(0, unitClause(&.{}, &.{}));
 }
 
 test "clause is a unit clause, one term" {
@@ -560,12 +560,12 @@ test "clause is a unit clause, one term" {
 
 test "clause is a unit clause, two terms" {
     // lit 1 [negative var 0] is unsatisfied, lit 2 is unit
-    try expectEqual(2, unitClause(&.{ .pos, .none }, &.{ 1, 2 }));
+    try expectEqual(2, unitClause(&.{ undefined, .neg, .none }, &.{ 1, 2 }));
 }
 
 test "clause is not a unit clause, two terms" {
     // lit 0 [positive var 0] is already satisfied, lit 2 is unassigned
-    try expectEqual(null, unitClause(&.{ .pos, .none }, &.{ 0, 2 }));
+    try expectEqual(null, unitClause(&.{ undefined, .pos, .none }, &.{ 1, 2 }));
 }
 
 test "clause is not unit clause, unsatisfied two terms" {
@@ -574,7 +574,7 @@ test "clause is not unit clause, unsatisfied two terms" {
 }
 
 test "clause is a unit clause, one literal forced" {
-    try expectEqual(2, unitClause(&.{ .neg, .none }, &.{ 0, 2 }));
+    try expectEqual(2, unitClause(&.{ undefined, .pos, .none }, &.{ -1, 2 }));
 }
 
 test "clause contains a variable - single term" {
@@ -602,40 +602,40 @@ test "one literal clause is not unsatisfied - unassigned" {
 }
 
 test "one literal clause is not unsatisfied - satisfied" {
-    try expect(!clauseUnsatisfied(&.{.neg}, &.{1}));
+    try expect(!clauseUnsatisfied(&.{ undefined, .neg }, &.{-1}));
 }
 
 test "empty clauses combined result in empty result" {
     const gpa = std.testing.allocator;
     const actual = try combine(gpa, &.{}, &.{});
     defer gpa.free(actual);
-    try expectEqualSlices(u32, &.{}, actual);
+    try expectEqualSlices(i32, &.{}, actual);
 }
 
 test "combined clause deduplicates literals" {
     const gpa = std.testing.allocator;
-    const actual = try combine(gpa, &.{ 0, 2, 4 }, &.{ 0, 2, 4 });
+    const actual = try combine(gpa, &.{ 1, 2, 3 }, &.{ 1, 2, 3 });
     defer gpa.free(actual);
-    try expectEqualSlices(u32, &.{ 0, 2, 4 }, actual);
+    try expectEqualSlices(i32, &.{ 1, 2, 3 }, actual);
 }
 
 test "combined clause eliminates negated literals" {
     const gpa = std.testing.allocator;
-    const actual = try combine(gpa, &.{ 0, 2, 4 }, &.{ 1, 3, 5 });
+    const actual = try combine(gpa, &.{ 1, 2, 3 }, &.{ -1, -2, -3 });
     defer gpa.free(actual);
-    try expectEqualSlices(u32, &.{}, actual);
+    try expectEqualSlices(i32, &.{}, actual);
 }
 
 test "clauses are combined correctly" {
     const gpa = std.testing.allocator;
 
-    const a = &.{ 3, 10, 5, 13, 17, 1, 7 };
-    const b = &.{ 13, 17, 9, 2, 11, 15 };
-    const c = &.{ 5, 13, 17, 1, 7, 9, 15 };
+    const a = &.{ -2, 6, -3, -7, -9, -1, -4 };
+    const b = &.{ -7, -9, -5, 2, -6, -8 };
+    const c = &.{ -3, -7, -9, -1, -4, -5, -8 };
 
     const actual = try combine(gpa, a, b);
     defer gpa.free(actual);
-    try expectEqualSlices(u32, c, actual);
+    try expectEqualSlices(i32, c, actual);
 }
 
 test "cdcl solves empty CNF" {
@@ -685,7 +685,7 @@ test "cdcl resolves correct clause" {
     var self: @This() = try .init(gpa, &reader);
     defer self.deinit(gpa);
 
-    if (try self.bcp(gpa, 1, .base)) |conflict| {
+    if (try self.bcp(gpa, -1, .none, .base)) |conflict| {
         try expectEqual(1, conflict);
     } else {
         return error.ExpectedConflictFromBcp;
@@ -731,5 +731,5 @@ test "cdcl solves all disallowed combo of 3 variables" {
     var self: @This() = try .init(gpa, &reader);
     defer self.deinit(gpa);
 
-    try expect(try self.cdcl(gpa));
+    try expect(!try self.cdcl(gpa));
 }
